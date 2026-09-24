@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.7.1
+Stable tag: 1.10.1
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,29 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.10.1 =
+* Fixed: A variation whose stored Square link is correct but whose label is worded differently ("Red Carbon Fiber" vs "Red", "0.5" vs ".5 Ohm") no longer gets a duplicate variation created next to it — the stored link wins when no stricter stage finds a better match
+* Fixed: Option comparison ignores word order and treats Iced/Freeze/Frozen as Ice ("Iced 6mg" = "6mg-ice"); taxonomy slugs like "0-5" read as 0.5
+
+= 1.10.0 =
+* Changed: The scheduled-sync category filter now only limits which NEW products are created. Square items already linked to a published WooCommerce product always sync — live listings whose Square item sat in an unselected category ("dispo pods", "Tanks", "Charger/Battery", "Mods", uncategorized) kept stale stock and price indefinitely
+
+= 1.9.9 =
+* Fixed: Square catalogs with two items for one product (e.g. two "Pod Juice Clear" entries) created a duplicate draft every sync — a WooCommerce product whose variations are already linked to a Square item's variations now counts as serving that item too
+* Fixed: ".5 Ohm" option values now match "0.5 Ohm" variations
+
+= 1.9.8 =
+* Fixed: Disabled (private) variations are no longer considered when matching Square variations. Exact-name matching was re-linking retired duplicates ("New 3mg", "Regular") so the enabled option customers see stopped receiving stock updates
+* Fixed: "New 3mg"-style reformulation labels are compared as "3mg"; Square's placeholder "Regular" variation now trusts its stored variation link
+
+= 1.9.7 =
+* Fixed: Duplicate variations — Square option values are now matched to existing WooCommerce variations after normalising strength formatting ("3" = "3mg", "0" = "omg", "3 ice" = "3mg-ice"). Previously the name check failed (<65% similar) and the sync created a second "3" variation next to the original "3mg" one on 135 variations; the original (with the order history) then kept stale stock
+
+= 1.9.6 =
+* Fixed: SKU, title-similarity and AI product matches now require the product names to describe the same item (word-level check). similar_text() alone let shared brand words carry a match — e.g. "Custard Monster Salts Pumpkin Spice" was synced into "Custard Monster Salt – Butterscotch", "Bo Pods"/"Juno Pods" into "Airis Pods" — so Square stock and prices were written onto the wrong WooCommerce products every night
+* Fixed: A WooCommerce product already linked (via _square_product_id) to one Square item can no longer be matched to a different Square item. The per-run "already matched" list reset every 5-product batch, so up to 152 products were being overwritten by two or more Square items in turn
+* Fixed: AI variation matches are only accepted when the returned ID is one of the product's own unclaimed variations
 
 = 1.7.1 =
 * Fixed: Scheduled sync silently skipped forever when a previous batch sync was interrupted (e.g. WP-Cron never received enough traffic to finish all batch iterations) — the stale batch lock (sws_batch_offset / sws_batch_total) is now automatically cleared after 4 hours so the next scheduled run proceeds normally instead of perpetually reporting "already in progress"

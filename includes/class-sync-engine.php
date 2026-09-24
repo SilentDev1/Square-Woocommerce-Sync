@@ -117,7 +117,20 @@ class SWS_Sync_Engine {
             $has_uncategorized = in_array( 'Uncategorized', $filters, true );
             $named_filters = array_filter( $filters, function( $f ) { return $f !== 'Uncategorized'; } );
 
-            $square_products = array_values( array_filter( $square_products, function( $p ) use ( $named_filters, $has_uncategorized ) {
+            // Items already linked to a WooCommerce product always sync, whatever their
+            // Square category — the filter only decides which NEW products get created.
+            // Otherwise a live listing whose Square item sits in an unselected category
+            // ("dispo pods", "Tanks", …) silently kept stale stock and price forever.
+            global $wpdb;
+            $linked_ids = array_flip( $wpdb->get_col(
+                "SELECT DISTINCT pm.meta_value FROM {$wpdb->postmeta} pm
+                 JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+                 WHERE pm.meta_key = '_square_product_id' AND pm.meta_value <> ''
+                   AND p.post_type = 'product' AND p.post_status IN ('publish','private')"
+            ) );
+
+            $square_products = array_values( array_filter( $square_products, function( $p ) use ( $named_filters, $has_uncategorized, $linked_ids ) {
+                if ( isset( $linked_ids[ $p['square_id'] ] ) ) return true;
                 $cats = $p['categories'] ?? [];
                 if ( $has_uncategorized && empty( $cats ) ) return true;
                 if ( ! empty( $named_filters ) ) {
@@ -127,7 +140,7 @@ class SWS_Sync_Engine {
                 }
                 return false;
             }));
-            $this->logger->info( sprintf( 'Category filter: %d of %d products match.', count( $square_products ), $before ) );
+            $this->logger->info( sprintf( 'Category filter: %d of %d products match (incl. items already linked to a live product).', count( $square_products ), $before ) );
         }
 
         $total = count( $square_products );

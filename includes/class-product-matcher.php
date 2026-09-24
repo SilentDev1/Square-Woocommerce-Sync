@@ -13,6 +13,8 @@ class SWS_Product_Matcher {
     private $last_match_info = [];
     private $square_id_cache = null;
     private $matched_wc_ids = [];
+    /** WC product (parent) ID → Square item ID that owns it, from _square_product_id meta. */
+    private $wc_owner_cache = [];
 
     public function __construct() {
         $this->ai                      = new SWS_Ai_Matcher();
@@ -55,7 +57,13 @@ class SWS_Product_Matcher {
         $sku_match = $this->match_by_sku( $square_product );
         if ( $sku_match ) {
             $name_sim = $this->name_similarity( $square_product['name'], $sku_match->get_name() );
-            if ( $name_sim >= 40 ) {
+            $claimed_by = $this->claimed_by_other( $sku_match->get_id(), $square_product );
+            if ( $claimed_by ) {
+                $this->logger->warning( sprintf(
+                    '[Matcher] SKU match rejected for "%s" → WC #%d "%s": already linked to Square item %s',
+                    $square_product['name'], $sku_match->get_id(), $sku_match->get_name(), $claimed_by
+                ));
+            } elseif ( $this->names_compatible( $square_product['name'], $sku_match->get_name() ) ) {
                 if ( ! isset( $this->matched_wc_ids[ $sku_match->get_id() ] ) ) {
                     $this->matched_wc_ids[ $sku_match->get_id() ] = $square_product['name'];
                     $this->last_match_info = [ 'method' => 'sku', 'confidence' => 1.0, 'reasoning' => 'Exact SKU match' ];
@@ -72,7 +80,7 @@ class SWS_Product_Matcher {
                 }
             } else {
                 $this->logger->warning( sprintf(
-                    '[Matcher] SKU match rejected for "%s" → WC #%d "%s": name similarity too low (%.0f%%)',
+                    '[Matcher] SKU match rejected for "%s" → WC #%d "%s": product names do not describe the same item (%.0f%% similar)',
                     $square_product['name'], $sku_match->get_id(), $sku_match->get_name(), $name_sim
                 ));
             }
@@ -99,8 +107,9 @@ class SWS_Product_Matcher {
         }
 
         // Filter out WC products already matched to other Square products
-        $candidates = array_filter( $candidates, function( $c ) {
-            return ! isset( $this->matched_wc_ids[ $c->get_id() ] );
+        $candidates = array_filter( $candidates, function( $c ) use ( $square_product ) {
+            return ! isset( $this->matched_wc_ids[ $c->get_id() ] )
+                && ! $this->claimed_by_other( $c->get_id(), $square_product );
         });
         $candidates = array_values( $candidates );
 
@@ -138,7 +147,7 @@ class SWS_Product_Matcher {
             }
         }
 
-        if ( $best_sim_prod && $best_sim_pct >= 80 ) {
+        if ( $best_sim_prod && $best_sim_pct >= 80 && $this->names_compatible( $square_product['name'], $best_sim_prod->get_name() ) ) {
             $this->matched_wc_ids[ $best_sim_prod->get_id() ] = $square_product['name'];
             $confidence = round( $best_sim_pct / 100, 2 );
             $this->last_match_info = [
@@ -168,15 +177,17 @@ class SWS_Product_Matcher {
             $wc_product = wc_get_product( $ai_result['match_id'] );
             if ( $wc_product ) {
                 $ai_name_sim = $this->name_similarity( $square_product['name'], $wc_product->get_name() );
-                if ( $ai_name_sim < 35 ) {
+                if ( $ai_name_sim < 35 || ! $this->names_compatible( $square_product['name'], $wc_product->get_name() ) ) {
                     $this->logger->warning( sprintf(
                         '[Matcher] AI match rejected for "%s" → WC #%d "%s": name similarity too low (%.0f%%)',
                         $square_product['name'], $wc_product->get_id(), $wc_product->get_name(), $ai_name_sim
                     ));
-                } elseif ( isset( $this->matched_wc_ids[ $wc_product->get_id() ] ) ) {
+                } elseif ( isset( $this->matched_wc_ids[ $wc_product->get_id() ] )
+                    || $this->claimed_by_other( $wc_product->get_id(), $square_product ) ) {
                     $this->logger->warning( sprintf(
                         '[Matcher] AI match rejected for "%s" → WC #%d: already matched to "%s"',
-                        $square_product['name'], $wc_product->get_id(), $this->matched_wc_ids[ $wc_product->get_id() ]
+                        $square_product['name'], $wc_product->get_id(),
+                        $this->matched_wc_ids[ $wc_product->get_id() ] ?? $this->claimed_by_other( $wc_product->get_id(), $square_product )
                     ));
                 } else {
                     $this->matched_wc_ids[ $wc_product->get_id() ] = $square_product['name'];
@@ -213,6 +224,126 @@ class SWS_Product_Matcher {
     }
 
     /**
+     * Square item ID that already owns this WC product, when it is not $square_id.
+     * Survives across batch requests (unlike $matched_wc_ids), so two Square items can
+     * no longer take turns overwriting one WooCommerce product.
+     */
+    private function claimed_by_other( $wc_id, array $square_product ) {
+        if ( $this->square_id_cache === null ) {
+            $this->load_square_id_cache();
+        }
+        $owner = $this->wc_owner_cache[ (int) $wc_id ] ?? '';
+        if ( $owner === '' || $owner === $square_product['square_id'] ) {
+            return '';
+        }
+        // Square sometimes holds two items for one product (e.g. two "Pod Juice Clear"
+        // entries). When this product's variations are already linked to this Square
+        // item's variations, it serves both items — not a conflict. Without this the
+        // second item was rejected every night and a duplicate draft was created.
+        $sq_var_ids = array_filter( array_column( $square_product['variations'] ?? [], 'square_variation_id' ) );
+        if ( $sq_var_ids ) {
+            global $wpdb;
+            $in     = implode( ',', array_fill( 0, count( $sq_var_ids ), '%s' ) );
+            $linked = $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->postmeta} pm JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+                 WHERE pm.meta_key = '_square_variation_id' AND pm.meta_value IN ($in)
+                   AND p.post_status = 'publish' AND ( p.ID = %d OR p.post_parent = %d )",
+                array_merge( array_values( $sq_var_ids ), [ (int) $wc_id, (int) $wc_id ] )
+            ) );
+            if ( (int) $linked > 0 ) {
+                return '';
+            }
+        }
+        return $owner;
+    }
+
+    /**
+     * Word-level check that two product names describe the same item.
+     *
+     * similar_text() alone passed "Custard Monster Salts Pumpkin Spice" →
+     * "Custard Monster Salt – Butterscotch" (67%) because brand words dominate.
+     * Here the names are compatible when one name's significant words are all found
+     * in the other (word order / "BY BRAND 30ML" suffixes don't matter), or when they
+     * share most of their words (Jaccard >= 0.6). Differing flavours/models on both
+     * sides fail the check.
+     */
+    public static function names_compatible( $name_a, $name_b ) {
+        $a = self::name_tokens( $name_a );
+        $b = self::name_tokens( $name_b );
+        if ( empty( $a ) || empty( $b ) ) {
+            return strtolower( trim( $name_a ) ) === strtolower( trim( $name_b ) );
+        }
+        $a_joined = implode( '', $a );
+        $b_joined = implode( '', $b );
+
+        $a_hit = self::count_found( $a, $b, $b_joined );
+        $b_hit = self::count_found( $b, $a, $a_joined );
+        if ( $a_hit === 0 || $b_hit === 0 ) return false;
+        if ( $a_hit === count( $a ) || $b_hit === count( $b ) ) return true;
+
+        $shared = min( $a_hit, $b_hit );
+        $union  = count( $a ) + count( $b ) - $shared;
+        return ( $shared / max( 1, $union ) ) >= 0.6;
+    }
+
+    /** How many of $tokens appear in the other name (as a word, or glued: "elf bar" ↔ "elfbar"). */
+    private static function count_found( array $tokens, array $other, $other_joined ) {
+        $hit = 0;
+        foreach ( $tokens as $t ) {
+            $found = strlen( $t ) >= 3 && ! ctype_digit( $t ) && strpos( $other_joined, $t ) !== false;
+            if ( ! $found ) {
+                foreach ( $other as $o ) {
+                    if ( self::tokens_equal( $t, $o ) ) { $found = true; break; }
+                }
+            }
+            if ( $found ) $hit++;
+        }
+        return $hit;
+    }
+
+    private static function name_tokens( $name ) {
+        static $stop = [
+            'a', 'the', 'by', 'and', 'with', 'for', 'of', 'salt', 'salts', 'nic', 'nicotine',
+            'eliquid', 'liquid', 'ejuice', 'juice', 'vape', 'disposable', 'disposables',
+            'pod', 'pods', 'kit', 'kits', 'tank', 'coil', 'coils', 'pack', 'replacement',
+            'device', 'ml', 'mg', 'pc', 'pcs', 'piece', 'single', 'new', 'ohm', 'ohms',
+        ];
+        static $alias = [ 'nkd' => 'naked', 'mvl' => 'monster vape labs', 'pachamama' => 'pacha' ];
+
+        $name = strtolower( html_entity_decode( (string) $name, ENT_QUOTES, 'UTF-8' ) );
+        $name = preg_replace( '/\(?\b\d+\s*-?\s*(pack|packs|pk|pcs?|piece|count|ct)\b\)?|\b(pack|packs)\s+of\s+\d+\b|\b\d+x\b/', ' ', $name ); // "5 Pack", "(2-pack)", "2x"
+        $name = preg_replace( '/\b\d*\.\d+\s*(ohms?|Ω)?|\b\d+\s*ohms?\b/u', ' ', $name ); // 0.15 Ohm, .5, 1 ohm
+        $name = preg_replace_callback( '/\b(ii|iii|iv|v|vi)\b/', function ( $m ) {
+            return (string) [ 'ii' => 2, 'iii' => 3, 'iv' => 4, 'v' => 5, 'vi' => 6 ][ $m[1] ];
+        }, $name );                                                        // Valyrian II → 2
+        $name = preg_replace( '/(\d+)k\b/', '${1}000', $name );          // 10k → 10000
+        $name = preg_replace( '/(\d+(?:ml|mg|mah|w))\b/', ' ', $name );   // 30ml, 50mg, 310mah, 80w
+        $name = preg_replace( '/[^a-z0-9]+/', ' ', $name );
+        $name = preg_replace( '/(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])/', ' ', $name ); // os5000 → os 5000
+        $tokens = [];
+        foreach ( explode( ' ', $name ) as $t ) {
+            if ( $t === '' || in_array( $t, $stop, true ) ) continue;
+            foreach ( explode( ' ', $alias[ $t ] ?? $t ) as $w ) {
+                if ( $w === '' ) continue; // single letters stay: "Pulse X" is not "Pulse 2"
+                $tokens[ $w ] = true;
+            }
+        }
+        return array_map( 'strval', array_keys( $tokens ) );
+    }
+
+    private static function tokens_equal( $x, $y ) {
+        if ( $x === $y ) return true;
+        if ( ctype_digit( $x ) || ctype_digit( $y ) ) return false;
+        // Singular/plural and short forms: "bar"/"bars", "berry"/"berries".
+        $short = strlen( $x ) <= strlen( $y ) ? $x : $y;
+        $long  = $short === $x ? $y : $x;
+        if ( strlen( $short ) >= 3 && strpos( $long, $short ) === 0 && strlen( $long ) - strlen( $short ) <= 3 ) return true;
+        // One-letter typos in longer words: "moster"/"monster".
+        if ( strlen( $short ) >= 5 && levenshtein( $x, $y ) <= 1 ) return true;
+        return false;
+    }
+
+    /**
      * Match by stored _square_product_id meta (for previously synced products).
      * Uses a pre-loaded cache for performance — one DB query instead of one per product.
      */
@@ -241,9 +372,10 @@ class SWS_Product_Matcher {
     private function load_square_id_cache() {
         global $wpdb;
         $this->square_id_cache = [];
+        $this->wc_owner_cache  = [];
 
         $results = $wpdb->get_results(
-            "SELECT pm.post_id, pm.meta_value, p.post_title
+            "SELECT pm.post_id, pm.meta_value, p.post_title, p.post_type, p.post_parent
              FROM {$wpdb->postmeta} pm
              JOIN {$wpdb->posts} p ON p.ID = pm.post_id
              WHERE pm.meta_key = '_square_product_id' AND pm.meta_value != ''
@@ -297,6 +429,16 @@ class SWS_Product_Matcher {
                     '[Matcher] Duplicate Square ID "%s": all %d products appear to be copies, using WC#%d',
                     $sq_id, count( $rows ), (int) $rows[0]['post_id']
                 ) );
+            }
+        }
+
+        $rows_by_post = array_column( $results, null, 'post_id' );
+        foreach ( $this->square_id_cache as $sq_id => $post_id ) {
+            $row = $rows_by_post[ $post_id ] ?? null;
+            if ( ! $row ) continue;
+            $owner_id = $row['post_type'] === 'product_variation' ? (int) $row['post_parent'] : $post_id;
+            if ( ! isset( $this->wc_owner_cache[ $owner_id ] ) ) {
+                $this->wc_owner_cache[ $owner_id ] = $sq_id;
             }
         }
 
@@ -521,7 +663,11 @@ class SWS_Product_Matcher {
         }
 
         $children     = $wc_product->get_children();
-        $wc_variations = array_filter( array_map( 'wc_get_product', $children ) );
+        // Only enabled variations. Disabled ("private") ones are retired duplicates —
+        // matching them by exact name re-linked them and left the live option stale.
+        $wc_variations = array_values( array_filter( array_map( 'wc_get_product', $children ), function( $wv ) {
+            return $wv && $wv->get_status( 'edit' ) === 'publish';
+        } ) );
 
         // Exclude WC variations already matched to a different Square variation in THIS
         // sync run.  Without this, the same WC variation (e.g. "blue razz") could be
@@ -547,6 +693,7 @@ class SWS_Product_Matcher {
         // If the stored ID matches but the variation name is very different from the WC
         // attribute values (< 65 % similarity), skip this match so the correct pairing
         // can be found by Stage 0.5 or Stage 1 below instead of creating duplicates.
+        $stored_fallback = null;
         if ( ! empty( $square_variation['square_variation_id'] ) ) {
             foreach ( $wc_variations as $wv ) {
                 $stored_id = $wv->get_meta( '_square_variation_id' );
@@ -555,11 +702,17 @@ class SWS_Product_Matcher {
                 }
                 $wc_attr_str = trim( implode( ' ', array_map( 'strtolower', $wv->get_variation_attributes() ) ) );
                 similar_text( $sq_name_norm_check, $wc_attr_str, $s0_pct );
-                if ( $s0_pct >= 65 ) {
+                // Square's placeholder variation ("Regular") carries no option to compare,
+                // so a stored ID link is the only reliable signal — trust it.
+                $is_placeholder = strtolower( trim( $square_variation['name'] ) ) === 'regular';
+                if ( $is_placeholder || $s0_pct >= 65 || $this->option_values_equal( $square_variation['option_values'], $wv->get_variation_attributes() ) ) {
                     return $wv; // Stored ID matches AND names are reasonably similar — trust it.
                 }
-                // Stored ID matches but names are too different: the ID was probably written
-                // by a buggy sync onto the wrong WC variation. Fall through to other stages.
+                // Stored ID matches but the labels differ ("Red Carbon Fiber" vs "Red",
+                // "6MG Ice" vs "Iced 6mg"). Try the stricter stages first; if none finds a
+                // better variation, the stored link wins (see below) instead of a new
+                // duplicate variation being created next to it.
+                $stored_fallback = $stored_fallback ?: $wv;
             }
         }
 
@@ -580,6 +733,25 @@ class SWS_Product_Matcher {
             }
         }
 
+        // Stage 0.6: Same option values once strength/size formatting is normalised —
+        // Square "3" / "6" vs the original WC "3mg" / "6mg", "0" vs "omg". Without this
+        // the sync created a second "3" variation next to "3mg" on every such product.
+        // Prefer a variation already linked to this Square variation, then any unclaimed one.
+        $sq_vid_norm = $square_variation['square_variation_id'] ?? '';
+        $norm_hits   = array_values( array_filter( $wc_variations, function( $wv ) use ( $square_variation ) {
+            return $this->option_values_equal( $square_variation['option_values'], $wv->get_variation_attributes() );
+        } ) );
+        foreach ( $norm_hits as $wv ) {
+            if ( $sq_vid_norm !== '' && $wv->get_meta( '_square_variation_id' ) === $sq_vid_norm ) {
+                return $wv;
+            }
+        }
+        foreach ( $norm_hits as $wv ) {
+            if ( $wv->get_meta( '_square_variation_id' ) === '' ) {
+                return $wv;
+            }
+        }
+
         // Stage 1: Match by SKU — with the same name-sanity check used in Stage 0.
         // A previous buggy sync may have overwritten a WC variation's SKU with a combo
         // variant's SKU, so we verify the names are reasonably similar before trusting
@@ -591,12 +763,16 @@ class SWS_Product_Matcher {
                 }
                 $wc_attr_str = trim( implode( ' ', array_map( 'strtolower', $wv->get_variation_attributes() ) ) );
                 similar_text( $sq_name_norm_check, $wc_attr_str, $s1_pct );
-                if ( $s1_pct >= 65 ) {
+                if ( $s1_pct >= 65 || $this->option_values_equal( $square_variation['option_values'], $wv->get_variation_attributes() ) ) {
                     return $wv;
                 }
                 // SKU matches but name doesn't — likely a corrupt SKU from a prior sync.
                 // Fall through to other stages.
             }
+        }
+
+        if ( $stored_fallback ) {
+            return $stored_fallback;
         }
 
         // Stages 2-4: Only consider variations not already claimed by a DIFFERENT Square
@@ -649,7 +825,11 @@ class SWS_Product_Matcher {
         $ai_result = $this->ai->match_variation( $square_variation, $unclaimed );
 
         if ( $ai_result['match_id'] && $ai_result['confidence'] >= 0.7 ) {
-            return wc_get_product( $ai_result['match_id'] );
+            foreach ( $unclaimed as $wv ) {
+                if ( $wv->get_id() === (int) $ai_result['match_id'] ) {
+                    return $wv;
+                }
+            }
         }
 
         // Stage 4: Single unclaimed variation fallback
@@ -658,5 +838,37 @@ class SWS_Product_Matcher {
         }
 
         return null;
+    }
+
+    /**
+     * Square option values vs WC variation attributes, compared after normalising
+     * nicotine/size formatting: "3" = "3mg" = "3 MG", "0" = "0mg" = "omg",
+     * "3 ice" = "3mg-ice". Order-insensitive; the number of values must match.
+     */
+    private function option_values_equal( array $sq_values, array $wc_attrs ) {
+        $a = array_map( [ $this, 'normalize_option_value' ], array_values( $sq_values ) );
+        $b = array_map( [ $this, 'normalize_option_value' ], array_values( $wc_attrs ) );
+        $a = array_values( array_filter( $a, 'strlen' ) );
+        $b = array_values( array_filter( $b, 'strlen' ) );
+        if ( empty( $a ) || count( $a ) !== count( $b ) ) {
+            return false;
+        }
+        sort( $a );
+        sort( $b );
+        return $a === $b;
+    }
+
+    private function normalize_option_value( $value ) {
+        $v = strtolower( trim( (string) $value ) );
+        $v = preg_replace( '/^new\s+(?=\d)/', '', $v );             // "New 3mg" (reformulation label) → 3mg
+        $v = preg_replace( '/^omg\b/', '0mg', $v );                 // "omg" typo for 0mg
+        $v = preg_replace( '/(?<![0-9])\.(\d)/', '0.$1', $v );        // ".5 ohm" → "0.5 ohm"
+        $v = preg_replace( '/(\d)-(\d)/', '$1.$2', $v );             // term slug "0-5" → 0.5
+        $v = preg_replace( '/(\d+(?:\.\d+)?)\s*mg\b/', '$1', $v ); // 3mg / 6 Mg → number
+        $v = preg_replace( '/\b(iced|freeze|frozen)\b/', 'ice', $v );  // "Iced 6mg" / "Freeze 6" = "6mg ice"
+        $tokens = preg_split( '/[^a-z0-9.]+/', $v, -1, PREG_SPLIT_NO_EMPTY );
+        $tokens = array_values( array_diff( $tokens, [ 'ohm', 'ohms', 'mg', 'new' ] ) );
+        sort( $tokens );                                             // word order doesn't matter
+        return implode( ' ', $tokens );
     }
 }

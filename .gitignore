@@ -4,3 +4,8 @@
 .env.*
 !.env.example
 *.log
+
+# Store operation backups/logs (client data) — keep local, never publish
+docs/*-backup*.json
+docs/*-log.txt
+docs/*-unlinked-*.csv
