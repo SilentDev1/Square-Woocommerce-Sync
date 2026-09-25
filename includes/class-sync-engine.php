@@ -33,7 +33,7 @@ class SWS_Sync_Engine {
      *   renames [ wc_id => [ [ sq, from, to, ok, why ] ] ]
      *   mixed   [ [ wc_id, option id, square variation id ] ] options linked to another Square item
      */
-    private $truth = [ 'claims' => [], 'renames' => [], 'mixed' => [] ];
+    private $truth = [ 'claims' => [], 'renames' => [], 'mixed' => [], 'hold' => [] ];
 
     /** Match of the Square item being processed: method, and whether SKUs confirm it. */
     private $cur_method   = '';
@@ -918,6 +918,16 @@ PROMPT;
             }
             $retire[] = $v;
         }
+        foreach ( $retire as $k => $v ) {
+            // Stock on the website but not in Square: often a listing an old link mixed up (salt vs
+            // regular, kit vs mod). Not guessed at — kept, and the listing's name is left too.
+            if ( (int) $v->get_stock_quantity() > 0 ) {
+                $this->truth['hold'][ $wc_product->get_id() ] = true;
+                $this->stats['review']++;
+                $this->logger->warning( sprintf( '    ⚑ REVIEW option #%d "%s" has %d in stock on the website but isn\'t in Square item "%s" — kept', $v->get_id(), implode( ', ', $v->get_attributes() ), (int) $v->get_stock_quantity(), $sq_product['name'] ) );
+                unset( $retire[ $k ] );
+            }
+        }
         foreach ( $retire as $v ) {
             $label = implode( ', ', $v->get_attributes() );
             $this->stats['retired']++;
@@ -1010,6 +1020,10 @@ PROMPT;
                 continue;
             }
             $r = $list[0];
+            if ( ! empty( $this->truth['hold'][ $wid ] ) ) {
+                $this->logger->warning( sprintf( '  ⚑ Name kept on #%d "%s" (Square: "%s") — it has stocked options Square doesn\'t know', $wid, $r['from'], $r['to'] ) );
+                continue;
+            }
             if ( ! $r['ok'] ) {
                 $this->logger->warning( sprintf( '  ⚑ Name kept on #%d "%s" (Square: "%s") — %s', $wid, $r['from'], $r['to'], $r['why'] ) );
                 continue;
@@ -1025,8 +1039,13 @@ PROMPT;
             }
         }
 
+        $seen = [];
         foreach ( $this->truth['mixed'] as $m ) {
             list( $wid, $vid, $sqvar ) = $m;
+            if ( isset( $seen[ $vid ] ) ) {
+                continue;
+            }
+            $seen[ $vid ] = true;
             $v = wc_get_product( $vid );
             if ( ! $v || $v->get_status( 'edit' ) !== 'publish' ) {
                 continue;
@@ -1062,7 +1081,7 @@ PROMPT;
             }
         }
         $this->truth_duplicate_listings( $square_products, $item_wc );
-        $this->truth = [ 'claims' => [], 'renames' => [], 'mixed' => [] ];
+        $this->truth = [ 'claims' => [], 'renames' => [], 'mixed' => [], 'hold' => [] ];
     }
 
     /**
