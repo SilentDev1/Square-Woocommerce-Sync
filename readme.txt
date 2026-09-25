@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.12.0
+Stable tag: 1.13.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,13 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.13.0 =
+* Square-truth mode checks every match by SKU before changing anything. A listing is confirmed when it shares a SKU with its Square item (or was matched by SKU). Unconfirmed matches keep their name, options and variations and are listed for review.
+* Names change only at the end of a run, and only when exactly one Square item matched the listing and all of the listing's SKUs belong to that item. A listing matched by two Square items is reported instead of being renamed back and forth.
+* Option labels follow Square only when the option's own SKU matches the Square variation's.
+* Duplicates are removed: an option linked to (or carrying the SKU of) another Square item is taken off when that item has its own listing or no longer exists in Square. A listing whose SKUs all belong to Square items other listings already have is set out of stock and hidden from the shop and search (the URL keeps working, marked _sws_duplicate_of). A listing is never left with no options.
+* New stats: review, duplicates.
 
 = 1.12.0 =
 * New: Quick stock sync — every 5 minutes, only the Square inventory counts that changed since the last run are copied to their linked WooCommerce listings, so register sales reach the website within minutes. Setting: "Update stock from Square every 5 minutes".
