@@ -179,6 +179,7 @@ class SWS_Admin_Page {
         update_option( 'sws_ai_generate_desc',   isset( $_POST['sws_ai_generate_desc'] ) ? '1' : '0' );
         update_option( 'sws_ai_verify_all',     isset( $_POST['sws_ai_verify_all'] ) ? '1' : '0' );
         update_option( 'sws_dry_run',           isset( $_POST['sws_dry_run'] ) ? '1' : '0' );
+        update_option( 'sws_square_truth',      isset( $_POST['sws_square_truth'] ) ? '1' : '0' );
 
         $sync_cats = isset( $_POST['sws_sync_categories'] ) ? array_map( 'sanitize_text_field', (array) $_POST['sws_sync_categories'] ) : [];
         $all_sq_cats = array_keys( get_option( 'sws_category_mapping', [] ) );
@@ -1100,6 +1101,10 @@ class SWS_Admin_Page {
                                         <label>
                                             <input type="checkbox" name="sws_sync_price" value="1" <?php checked(get_option('sws_sync_price','0'),'1'); ?>>
                                             Sync prices from Square (off by default — enable if Square is your price source)
+                                        </label><br>
+                                        <label>
+                                            <input type="checkbox" name="sws_square_truth" value="1" <?php checked(get_option('sws_square_truth','0'),'1'); ?>>
+                                            Square is the source of truth — product names, option labels and SKUs follow Square; options Square doesn't have are disabled (order history kept); every Square item is matched, the category filter only limits new products; listings not in Square are set out of stock
                                         </label><br>
                                         <label>
                                             <input type="checkbox" name="sws_create_new" value="1" <?php checked(get_option('sws_create_new','1'),'1'); ?>>

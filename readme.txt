@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.10.2
+Stable tag: 1.11.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,9 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.11.0 =
+* New: "Square is the source of truth" setting. Product names, option labels and SKUs follow Square (a SKU held by a retired or unlinked listing moves to the Square-linked one); options Square doesn't have are disabled and set out of stock, keeping their order history; every Square item is matched and updated, and the category filter only limits which new products are created; at the end of a full run, live listings that aren't in Square at all are set out of stock (listings that look like a Square item but didn't match are only reported). Honours dry run.
 
 = 1.10.2 =
 * Fixed: One Square variation is linked to exactly one WooCommerce option. When a sync pairs a Square variation with an option, any other option of the same product still carrying that Square variation ID (a retired duplicate, or one an earlier sync mis-paired) is unlinked, so it can't be mistaken for the same Square item by tools that push stock (StockDeck)

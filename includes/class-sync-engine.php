@@ -16,6 +16,17 @@ class SWS_Sync_Engine {
     private $min_confidence;
     private $ai_verify_all;
 
+    /**
+     * Square is the source of truth (option sws_square_truth): product names, option labels and
+     * SKUs follow Square; options Square doesn't have are retired; every Square item is matched
+     * (the category filter only limits which NEW products get created); live listings that
+     * aren't in Square are set out of stock.
+     */
+    private $square_truth = false;
+
+    /** Variation IDs created in this request (never retired by the same run). */
+    private $created_var_ids = [];
+
     private $stats = [
         'matched'       => 0,
         'updated'       => 0,
@@ -26,6 +37,11 @@ class SWS_Sync_Engine {
         'total_square'  => 0,
         'ai_checks'     => 0,
         'ai_issues'     => 0,
+        'renamed'       => 0,
+        'relabeled'     => 0,
+        'retired'       => 0,
+        'not_in_square' => 0,
+        'sku_taken'     => 0,
     ];
 
     /**
@@ -48,11 +64,14 @@ class SWS_Sync_Engine {
         $this->dry_run            = get_option( 'sws_dry_run', '0' ) === '1';
         $this->min_confidence     = (float) get_option( 'sws_ai_confidence_threshold', 0.75 );
         $this->ai_verify_all      = get_option( 'sws_ai_verify_all', '1' ) === '1';
+        $this->square_truth       = get_option( 'sws_square_truth', '0' ) === '1';
     }
 
     public function run_full_sync() {
         $start = microtime( true );
-        $this->logger->info( '=== Square WooCommerce Sync Started' . ( $this->dry_run ? ' [DRY RUN]' : '' ) . ' ===' );
+        $this->logger->info( '=== Square WooCommerce Sync Started' . ( $this->dry_run ? ' [DRY RUN]' : '' ) . ( $this->square_truth ? ' [SQUARE IS SOURCE OF TRUTH]' : '' ) . ' ===' );
+        // Full runs process every Square item; the configured categories only decide which NEW products get created.
+        update_option( 'sws_batch_create_filter', array_values( array_filter( (array) get_option( 'sws_sync_categories', [] ) ) ) );
 
         $square_products = $this->square->get_normalized_products();
         if ( is_wp_error( $square_products ) ) {
@@ -89,6 +108,8 @@ class SWS_Sync_Engine {
             }
         }
 
+        $this->truth_retire_unlisted( $square_products );
+
         return $this->finalize_sync( $start );
     }
 
@@ -112,7 +133,10 @@ class SWS_Sync_Engine {
             return [ 'success' => false, 'error' => $square_products->get_error_message() ];
         }
 
-        if ( ! empty( $filters ) ) {
+        update_option( 'sws_batch_create_filter', $filters );
+        if ( ! empty( $filters ) && $this->square_truth ) {
+            $this->logger->info( sprintf( 'Square-truth mode: all %d Square items are matched and updated; the category filter (%s) only limits which new products are created.', count( $square_products ), implode( ', ', $filters ) ) );
+        } elseif ( ! empty( $filters ) ) {
             $before = count( $square_products );
             $has_uncategorized = in_array( 'Uncategorized', $filters, true );
             $named_filters = array_filter( $filters, function( $f ) { return $f !== 'Uncategorized'; } );
@@ -254,8 +278,13 @@ class SWS_Sync_Engine {
         $upload_dir = wp_upload_dir();
         $cache_file = $upload_dir['basedir'] . '/sws-logs/batch-catalog.json';
         if ( file_exists( $cache_file ) ) {
+            $catalog = json_decode( (string) file_get_contents( $cache_file ), true );
+            if ( is_array( $catalog ) ) {
+                $this->truth_retire_unlisted( $catalog );
+            }
             @unlink( $cache_file );
         }
+        delete_option( 'sws_batch_create_filter' );
 
         $result = $this->finalize_sync( $start_time );
 
@@ -346,7 +375,11 @@ class SWS_Sync_Engine {
             }
         } else {
             $this->logger->info( sprintf( '  ✗ No match found for "%s"', $sq_product['name'] ) );
-            if ( $this->create_new ) {
+            if ( $this->create_new && ! $this->category_allows_creation( $sq_product ) ) {
+                $this->logger->info( sprintf( '  ⏭ Not creating "%s" — its Square category is not selected for new products', $sq_product['name'] ) );
+                $this->stats['skipped']++;
+                $this->update_product_record( $sq_product, null, 'unmatched', '', 0, 'Category not selected for new products', [] );
+            } elseif ( $this->create_new ) {
                 if ( $this->skip_out_of_stock && $this->is_square_product_out_of_stock( $sq_product ) ) {
                     $this->logger->info( sprintf( '  ⏭ Skipping "%s" — out of stock on Square', $sq_product['name'] ) );
                     $this->stats['skipped']++;
@@ -475,6 +508,18 @@ PROMPT;
 
         $wc_product->update_meta_data( '_square_product_id', $sq_product['square_id'] );
 
+        if ( $this->square_truth ) {
+            $sq_name = trim( (string) $sq_product['name'] );
+            if ( $sq_name !== '' && $sq_name !== trim( html_entity_decode( $wc_product->get_name( 'edit' ), ENT_QUOTES, 'UTF-8' ) ) ) {
+                $this->logger->info( sprintf( '  ✎ Name: "%s" → "%s"', $wc_product->get_name( 'edit' ), $sq_name ) );
+                $changes[] = [ 'field' => 'name', 'from' => $wc_product->get_name( 'edit' ), 'to' => $sq_name ];
+                $this->stats['renamed']++;
+                if ( ! $this->dry_run ) {
+                    $wc_product->set_name( $sq_name ); // The URL slug is kept.
+                }
+            }
+        }
+
         $sq_is_variable = count( $sq_product['variations'] ) > 1 ||
                           ( count( $sq_product['variations'] ) === 1 && $sq_product['variations'][0]['name'] !== 'Regular' );
 
@@ -545,13 +590,16 @@ PROMPT;
         $sq_var   = $sq_product['variations'][0] ?? null;
         if ( ! $sq_var ) return [ 'changes' => $changes, 'pending' => $pending ];
 
-        if ( empty( $wc_product->get_sku() ) && ! empty( $sq_var['sku'] ) ) {
-            if ( ! $this->dry_run ) {
-                if ( $this->sku_is_available( $sq_var['sku'], $wc_product->get_id() ) ) {
+        if ( ! empty( $sq_var['sku'] ) && $wc_product->get_sku() !== $sq_var['sku'] && ( empty( $wc_product->get_sku() ) || $this->square_truth ) ) {
+            if ( $this->dry_run ) {
+                $changes[] = [ 'field' => 'sku', 'from' => $wc_product->get_sku() ?: '', 'to' => $sq_var['sku'] ];
+                $this->logger->info( sprintf( '    + SKU: %s → %s', $wc_product->get_sku() ?: '(none)', $sq_var['sku'] ) );
+            } else {
+                if ( $this->sku_is_available( $sq_var['sku'], $wc_product->get_id() ) || $this->take_over_sku( $sq_var['sku'], $sq_var['square_variation_id'], $wc_product->get_id() ) ) {
                     $wc_product->set_sku( $sq_var['sku'] );
                     $this->stats['sku_added']++;
                     $changes[] = [ 'field' => 'sku', 'from' => '', 'to' => $sq_var['sku'] ];
-                    $this->logger->info( sprintf( '    + Added SKU: %s', $sq_var['sku'] ) );
+                    $this->logger->info( sprintf( '    + SKU: %s', $sq_var['sku'] ) );
                 } else {
                     $this->logger->warning( sprintf( '    ⚠ SKU "%s" already used by another product — skipped', $sq_var['sku'] ) );
                 }
@@ -679,13 +727,21 @@ PROMPT;
             $wc_sku = $wc_var->get_sku();
             $sq_sku = $sq_var['sku'];
             if ( ! empty( $sq_sku ) && $wc_sku !== $sq_sku && ! $this->dry_run ) {
-                if ( $this->sku_is_available( $sq_sku, $var_id ) ) {
+                if ( $this->sku_is_available( $sq_sku, $var_id ) || $this->take_over_sku( $sq_sku, $sq_var['square_variation_id'], $var_id ) ) {
                     $wc_var->set_sku( $sq_sku );
                     $this->stats['sku_added']++;
                     $var_changes[] = [ 'field' => 'sku', 'variation' => $sq_var['name'], 'from' => $wc_sku ?: '(none)', 'to' => $sq_sku ];
                     $this->logger->info( sprintf( '      + SKU: %s → %s', $wc_sku ?: '(none)', $sq_sku ) );
                 } else {
                     $this->logger->warning( sprintf( '      ⚠ SKU "%s" already used by another product — skipped', $sq_sku ) );
+                }
+            }
+
+            if ( $this->square_truth ) {
+                $relabel = $this->relabel_variation( $wc_product, $wc_var, (string) $sq_var['name'] );
+                if ( $relabel ) {
+                    $var_changes[] = $relabel;
+                    $meta_dirty    = true;
                 }
             }
 
@@ -749,7 +805,267 @@ PROMPT;
             $changes = array_merge( $changes, $created );
         }
 
+        if ( $this->square_truth ) {
+            $changes = array_merge( $changes, $this->retire_unmatched_variations( $sq_product, $wc_product, $claimed_wc_ids ) );
+        }
+
         return $changes;
+    }
+
+    /**
+     * Square-truth: enabled options of this product that no Square variation of this item matched
+     * are retired — disabled (private), set out of stock and unlinked — so the listing offers
+     * exactly what Square has. Order history stays on the disabled option. Options linked to a
+     * variation of a DIFFERENT Square item are left alone (a listing that mixes two Square items
+     * is reported, not guessed at).
+     */
+    private function retire_unmatched_variations( array $sq_product, $wc_product, array $claimed_wc_ids ) {
+        $changes  = [];
+        $item_var = array_flip( array_column( $sq_product['variations'], 'square_variation_id' ) );
+        $product  = wc_get_product( $wc_product->get_id() ); // Includes variations created just now.
+        $live     = 0;
+        $retire   = [];
+        foreach ( $product->get_children() as $cid ) {
+            $v = wc_get_product( $cid );
+            if ( ! $v || $v->get_status( 'edit' ) !== 'publish' ) {
+                continue;
+            }
+            if ( in_array( (int) $cid, $claimed_wc_ids, true ) ) {
+                $live++;
+                continue;
+            }
+            $stored = (string) $v->get_meta( '_square_variation_id' );
+            if ( $stored !== '' && ! isset( $item_var[ $stored ] ) ) {
+                $this->logger->warning( sprintf( '    ⚑ Option #%d "%s" belongs to another Square item (%s) — left as is (listing mixes Square items)', $cid, implode( ', ', $v->get_attributes() ), $stored ) );
+                $live++;
+                continue;
+            }
+            // Created in this run for this Square item → matched by construction.
+            if ( in_array( (int) $cid, $this->created_var_ids, true ) ) {
+                $live++;
+                continue;
+            }
+            $retire[] = $v;
+        }
+        foreach ( $retire as $v ) {
+            $label = implode( ', ', $v->get_attributes() );
+            $this->stats['retired']++;
+            $changes[] = [ 'field' => 'retired', 'variation' => $label, 'from' => 'enabled', 'to' => 'disabled' ];
+            $this->logger->warning( sprintf( '    ✂ Retire option #%d "%s" (stock %s) — not in Square item "%s"', $v->get_id(), $label, (string) $v->get_stock_quantity(), $sq_product['name'] ) );
+            if ( $this->dry_run ) {
+                continue;
+            }
+            if ( $live === 0 && empty( $sq_product['variations'] ) ) {
+                break; // Never empty a listing when Square has nothing to replace it with.
+            }
+            $id = $v->get_id();
+            $v->set_status( 'private' );
+            $v->save();
+            update_post_meta( $id, '_manage_stock', 'yes' );
+            update_post_meta( $id, '_stock', 0 );
+            update_post_meta( $id, '_stock_status', 'outofstock' );
+            delete_post_meta( $id, '_square_variation_id' );
+            update_post_meta( $id, '_sws_retired', gmdate( 'c' ) . ' not in Square item ' . $sq_product['square_id'] );
+            wp_cache_delete( $id, 'post_meta' );
+            wc_delete_product_transients( $id );
+        }
+        return $changes;
+    }
+
+    /**
+     * Square-truth: make a variation's option label read exactly like Square's variation name.
+     * Only for products with a single variation attribute. Taxonomy attributes get (or reuse) a term.
+     *
+     * @return array|null change record
+     */
+    private function relabel_variation( $wc_product, $wc_var, string $sq_label ) {
+        $sq_label = trim( $sq_label );
+        if ( $sq_label === '' || strtolower( $sq_label ) === 'regular' ) {
+            return null;
+        }
+        $var_attrs = array_values( array_filter( $wc_product->get_attributes(), function( $a ) { return $a->get_variation(); } ) );
+        if ( count( $var_attrs ) !== 1 ) {
+            return null;
+        }
+        $attr = $var_attrs[0];
+        $name = $attr->get_name();
+        $key  = 'attribute_' . sanitize_title( $name );
+        $cur  = (string) get_post_meta( $wc_var->get_id(), $key, true );
+        if ( $attr->is_taxonomy() ) {
+            $term  = $cur !== '' ? get_term_by( 'slug', $cur, $name ) : false;
+            $label = $term ? $term->name : $cur;
+            if ( strtolower( trim( html_entity_decode( $label, ENT_QUOTES, 'UTF-8' ) ) ) === strtolower( $sq_label ) ) {
+                return null;
+            }
+            $this->stats['relabeled']++;
+            $this->logger->info( sprintf( '      ✎ Option: "%s" → "%s"', $label, $sq_label ) );
+            if ( ! $this->dry_run ) {
+                $new = get_term_by( 'name', $sq_label, $name );
+                if ( ! $new ) {
+                    $res = wp_insert_term( $sq_label, $name );
+                    if ( is_wp_error( $res ) ) {
+                        $this->logger->warning( '      ⚠ Could not create term: ' . $res->get_error_message() );
+                        return null;
+                    }
+                    $new = get_term( $res['term_id'], $name );
+                }
+                wp_set_object_terms( $wc_product->get_id(), (int) $new->term_id, $name, true );
+                $opts = array_map( 'intval', (array) $attr->get_options() );
+                if ( ! in_array( (int) $new->term_id, $opts, true ) ) {
+                    $opts[] = (int) $new->term_id;
+                    $attr->set_options( $opts );
+                    $this->save_attribute( $wc_product, $attr );
+                }
+                update_post_meta( $wc_var->get_id(), $key, $new->slug );
+                $this->pending_variation_attrs[ $wc_var->get_id() ][ $key ] = $new->slug;
+            }
+            return [ 'field' => 'option', 'variation' => $sq_label, 'from' => $label, 'to' => $sq_label ];
+        }
+        if ( $cur === $sq_label ) {
+            return null;
+        }
+        $this->stats['relabeled']++;
+        $this->logger->info( sprintf( '      ✎ Option: "%s" → "%s"', $cur, $sq_label ) );
+        if ( ! $this->dry_run ) {
+            $opts = (array) $attr->get_options();
+            if ( ! in_array( $sq_label, $opts, true ) ) {
+                $opts[] = $sq_label;
+                $attr->set_options( $opts );
+                $this->save_attribute( $wc_product, $attr );
+            }
+            update_post_meta( $wc_var->get_id(), $key, $sq_label );
+            $this->pending_variation_attrs[ $wc_var->get_id() ][ $key ] = $sq_label;
+        }
+        return [ 'field' => 'option', 'variation' => $sq_label, 'from' => $cur, 'to' => $sq_label ];
+    }
+
+    private function save_attribute( $wc_product, $attr ) {
+        $all = $wc_product->get_attributes();
+        foreach ( $all as $k => $a ) {
+            if ( $a->get_name() === $attr->get_name() ) {
+                $all[ $k ] = $attr;
+            }
+        }
+        $wc_product->set_attributes( $all );
+    }
+
+    /**
+     * Square-truth: Square's SKU belongs to its variation. If another post holds it and isn't a live
+     * listing linked to that same Square variation (a retired option, an unlinked duplicate, or one
+     * whose own Square SKU differs), clear it there so it can be set here.
+     */
+    private function take_over_sku( string $sku, string $sq_var_id, int $owner_id ) : bool {
+        if ( ! $this->square_truth || $sku === '' ) {
+            return false;
+        }
+        $holder = (int) wc_get_product_id_by_sku( $sku );
+        if ( ! $holder || $holder === $owner_id ) {
+            return true;
+        }
+        if ( (string) get_post_meta( $holder, '_square_variation_id', true ) === $sq_var_id && get_post_status( $holder ) === 'publish' ) {
+            return false; // Genuinely linked twice — leave for the exclusivity pass.
+        }
+        $h = wc_get_product( $holder );
+        if ( ! $h ) {
+            return false;
+        }
+        $h->set_sku( '' );
+        $h->save();
+        $this->stats['sku_taken']++;
+        $this->logger->warning( sprintf( '      ⇄ SKU "%s" moved from #%d to #%d (Square assigns it to this item)', $sku, $holder, $owner_id ) );
+        return true;
+    }
+
+    /** Creation gate: the stored category filter (if any) decides which NEW products are created. */
+    private function category_allows_creation( array $sq_product ) : bool {
+        $filters = (array) get_option( 'sws_batch_create_filter', [] );
+        if ( empty( $filters ) ) {
+            return true;
+        }
+        $cats = (array) ( $sq_product['categories'] ?? [] );
+        if ( in_array( 'Uncategorized', $filters, true ) && empty( $cats ) ) {
+            return true;
+        }
+        return (bool) array_intersect( $filters, $cats );
+    }
+
+    /**
+     * Square-truth, end of a FULL run: live listings with no Square link at all, whose SKUs are not
+     * in Square and whose name doesn't describe any Square item, are set out of stock (kept published,
+     * marked _sws_not_in_square). Listings that look like a Square item but didn't match are only reported.
+     */
+    private function truth_retire_unlisted( array $square_products ) {
+        if ( ! $this->square_truth || $this->stats['errors'] > 0 ) {
+            return;
+        }
+        global $wpdb;
+        $skus  = [];
+        $names = [];
+        foreach ( $square_products as $sp ) {
+            $names[] = $sp['name'];
+            foreach ( $sp['variations'] as $sv ) {
+                if ( ! empty( $sv['sku'] ) ) {
+                    $skus[ trim( $sv['sku'] ) ] = true;
+                }
+            }
+        }
+        $ids = $wpdb->get_col(
+            "SELECT p.ID FROM {$wpdb->posts} p
+             WHERE p.post_type = 'product' AND p.post_status IN ('publish','private')
+               AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} m WHERE m.post_id = p.ID AND m.meta_key IN ('_square_product_id','_square_variation_id') AND m.meta_value <> '' )
+               AND NOT EXISTS ( SELECT 1 FROM {$wpdb->posts} c JOIN {$wpdb->postmeta} cm ON cm.post_id = c.ID
+                                WHERE c.post_parent = p.ID AND c.post_type = 'product_variation' AND c.post_status = 'publish'
+                                  AND cm.meta_key = '_square_variation_id' AND cm.meta_value <> '' )"
+        );
+        foreach ( $ids as $pid ) {
+            $p = wc_get_product( $pid );
+            if ( ! $p ) {
+                continue;
+            }
+            $units = $p->is_type( 'variable' ) ? array_filter( array_map( 'wc_get_product', $p->get_children() ) ) : [ $p ];
+            $sku_hit = false;
+            $in_stock = false;
+            foreach ( $units as $u ) {
+                if ( $u->get_sku() !== '' && isset( $skus[ $u->get_sku() ] ) ) {
+                    $sku_hit = true;
+                }
+                if ( $u->get_stock_status() === 'instock' ) {
+                    $in_stock = true;
+                }
+            }
+            $looks_like = false;
+            foreach ( $names as $n ) {
+                if ( SWS_Product_Matcher::names_compatible( $n, $p->get_name() ) ) {
+                    $looks_like = $n;
+                    break;
+                }
+            }
+            if ( $sku_hit || $looks_like ) {
+                $this->logger->warning( sprintf( '  ⚑ #%d "%s" is not linked but looks like Square "%s" — review', $pid, $p->get_name(), $looks_like ?: 'SKU match' ) );
+                continue;
+            }
+            if ( ! $in_stock ) {
+                continue;
+            }
+            $this->stats['not_in_square']++;
+            $this->logger->warning( sprintf( '  ✂ #%d "%s" is not in Square — set out of stock', $pid, $p->get_name() ) );
+            if ( $this->dry_run ) {
+                continue;
+            }
+            foreach ( $units as $u ) {
+                update_post_meta( $u->get_id(), '_manage_stock', 'yes' );
+                update_post_meta( $u->get_id(), '_stock', 0 );
+                update_post_meta( $u->get_id(), '_stock_status', 'outofstock' );
+                wp_cache_delete( $u->get_id(), 'post_meta' );
+            }
+            update_post_meta( $pid, '_sws_not_in_square', gmdate( 'c' ) );
+            if ( $p->is_type( 'variable' ) ) {
+                WC_Product_Variable::sync_stock_status( $pid );
+            } else {
+                update_post_meta( $pid, '_stock_status', 'outofstock' );
+            }
+            wc_delete_product_transients( $pid );
+        }
     }
 
     private function create_missing_variations( $wc_product, array $sq_product, array $missing_vars ) {
@@ -936,6 +1252,7 @@ PROMPT;
             $var_id = $variation->save();
 
             if ( $var_id ) {
+                $this->created_var_ids[] = (int) $var_id;
                 // Write ALL values AFTER save() to prevent hook interference during save()
                 // from reverting them (same pattern used for stock/price on existing variations).
 
