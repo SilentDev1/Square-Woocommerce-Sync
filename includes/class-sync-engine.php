@@ -497,6 +497,14 @@ PROMPT;
         }
 
         if ( $wc_product->is_type( 'variable' ) ) {
+            // A variable product is never itself a Square variation. A link left over from when it
+            // was simple points at one of its options' Square variations, so tools that push stock
+            // (StockDeck) would write the parent's number onto that option. Drop it.
+            if ( $wc_product->get_meta( '_square_variation_id' ) !== '' && ! $this->dry_run ) {
+                $this->logger->info( sprintf( '    ✂ Removed leftover variation link from variable product #%d', $wc_product->get_id() ) );
+                delete_post_meta( $wc_product->get_id(), '_square_variation_id' );
+                $wc_product->delete_meta_data( '_square_variation_id' );
+            }
             $var_changes = $this->update_variable_product( $sq_product, $wc_product );
             $changes = array_merge( $changes, $var_changes );
         }
@@ -644,6 +652,26 @@ PROMPT;
             if ( $stored_sq_id !== $sq_var['square_variation_id'] ) {
                 $wc_var->update_meta_data( '_square_variation_id', $sq_var['square_variation_id'] );
                 $meta_dirty = true;
+            }
+
+            // One Square variation ↔ one WooCommerce option. Any OTHER option of this product still
+            // carrying this Square variation ID is a stale duplicate (a retired option, or one an
+            // earlier sync mis-paired): it would never be updated again, yet anything reading the link
+            // (StockDeck's stock push, reports) would treat it as the same Square item. Unlink it.
+            if ( ! $this->dry_run ) {
+                foreach ( $wc_product->get_children() as $other_id ) {
+                    if ( (int) $other_id === $var_id ) {
+                        continue;
+                    }
+                    if ( get_post_meta( $other_id, '_square_variation_id', true ) === $sq_var['square_variation_id'] ) {
+                        delete_post_meta( $other_id, '_square_variation_id' );
+                        wc_delete_product_transients( $other_id );
+                        $this->logger->warning( sprintf(
+                            '      ✂ Unlinked WC Variation #%d: Square variation "%s" belongs to #%d',
+                            $other_id, $sq_var['name'], $var_id
+                        ) );
+                    }
+                }
             }
 
             // Always sync the SKU from Square — this also auto-corrects duplicates left by

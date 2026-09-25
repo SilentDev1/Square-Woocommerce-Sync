@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.10.1
+Stable tag: 1.10.2
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,10 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.10.2 =
+* Fixed: One Square variation is linked to exactly one WooCommerce option. When a sync pairs a Square variation with an option, any other option of the same product still carrying that Square variation ID (a retired duplicate, or one an earlier sync mis-paired) is unlinked, so it can't be mistaken for the same Square item by tools that push stock (StockDeck)
+* Fixed: Variable products no longer keep a leftover Square variation link from when they were simple products
 
 = 1.10.1 =
 * Fixed: A variation whose stored Square link is correct but whose label is worded differently ("Red Carbon Fiber" vs "Red", "0.5" vs ".5 Ohm") no longer gets a duplicate variation created next to it — the stored link wins when no stricter stage finds a better match
