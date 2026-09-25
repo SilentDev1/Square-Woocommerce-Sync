@@ -609,7 +609,8 @@ PROMPT;
         $wc_product->update_meta_data( '_square_variation_id', $sq_var['square_variation_id'] );
 
         if ( $this->sync_stock ) {
-            $new_qty = $sq_var['quantity'];
+            // Website stock = Square count minus open online orders not yet rung up in Square.
+            $new_qty = SWS_Stock_Sync::site_qty( $wc_product->get_id(), (int) $sq_var['quantity'] );
             $old_qty = $wc_product->get_stock_quantity();
 
             if ( $old_qty != $new_qty ) {
@@ -749,7 +750,8 @@ PROMPT;
             $pending_var = [];
 
             if ( $this->sync_stock ) {
-                $new_qty = (int) ( $sq_var['quantity'] ?? 0 );
+                // Website stock = Square count minus open online orders not yet rung up in Square.
+                $new_qty = SWS_Stock_Sync::site_qty( $var_id, (int) ( $sq_var['quantity'] ?? 0 ) );
                 // Use 'edit' context to read the variation's own stock (not inherited from parent).
                 $own_manage = $wc_var->get_manage_stock( 'edit' );
                 $old_qty    = (int) $wc_var->get_stock_quantity( 'edit' );

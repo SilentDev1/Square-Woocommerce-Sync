@@ -3,7 +3,7 @@
  * Plugin Name: Square WooCommerce Sync Pro
  * Plugin URI:  https://cao-tech.com/square-woo-sync
  * Description: AI-powered synchronization between Square inventory and WooCommerce products. Automatically matches products by title, category, and variation, updates SKUs, stock levels, and creates new products with AI-generated descriptions.
- * Version:     1.11.0
+ * Version:     1.12.0
  * Author:      Cao-Tech LLC
  * Author URI:  https://cao-tech.com
  * License:     GPL-2.0-or-later
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'SWS_VERSION', '1.11.0' );
+define( 'SWS_VERSION', '1.12.0' );
 define( 'SWS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SWS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'SWS_PLUGIN_FILE', __FILE__ );
@@ -299,6 +299,8 @@ class Square_Woo_Sync {
         require_once SWS_PLUGIN_DIR . 'includes/class-product-matcher.php';
         require_once SWS_PLUGIN_DIR . 'includes/class-sync-engine.php';
         require_once SWS_PLUGIN_DIR . 'includes/class-sync-logger.php';
+        require_once SWS_PLUGIN_DIR . 'includes/class-stock-sync.php';
+        SWS_Stock_Sync::init();
         require_once SWS_PLUGIN_DIR . 'admin/class-admin-page.php';
 
         $stored_version = get_option( 'sws_plugin_version', '0' );

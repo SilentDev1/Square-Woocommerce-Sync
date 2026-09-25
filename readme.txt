@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.11.0
+Stable tag: 1.12.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,10 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.12.0 =
+* New: Quick stock sync — every 5 minutes, only the Square inventory counts that changed since the last run are copied to their linked WooCommerce listings, so register sales reach the website within minutes. Setting: "Update stock from Square every 5 minutes".
+* New: Hold stock for open online orders — website stock = Square count − quantity in pending/processing/on-hold orders from the last 14 days, until the order is completed (for pay-in-store shops where Square only learns about the sale at pickup). Used by both the quick sync and the full sync. Setting: "Hold stock for open online orders" (on by default).
 
 = 1.11.0 =
 * New: "Square is the source of truth" setting. Product names, option labels and SKUs follow Square (a SKU held by a retired or unlinked listing moves to the Square-linked one); options Square doesn't have are disabled and set out of stock, keeping their order history; every Square item is matched and updated, and the category filter only limits which new products are created; at the end of a full run, live listings that aren't in Square at all are set out of stock (listings that look like a Square item but didn't match are only reported). Honours dry run.

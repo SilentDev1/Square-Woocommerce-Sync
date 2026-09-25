@@ -61,6 +61,29 @@ class SWS_Square_Api {
     }
 
     /**
+     * Inventory counts (IN_STOCK at this location) that changed after $updated_after — for the
+     * 5-minute quick stock sync.
+     *
+     * @param string      $updated_after RFC 3339 time.
+     * @param string|null $cursor        Page cursor.
+     * @return array|WP_Error { counts, cursor? }
+     */
+    public function get_changed_counts( $updated_after, $cursor = null ) {
+        $body = [
+            'states'        => [ 'IN_STOCK' ],
+            'updated_after' => $updated_after,
+            'limit'         => 1000,
+        ];
+        if ( $this->location_id ) {
+            $body['location_ids'] = [ $this->location_id ];
+        }
+        if ( $cursor ) {
+            $body['cursor'] = $cursor;
+        }
+        return $this->request( '/inventory/counts/batch-retrieve', 'POST', $body );
+    }
+
+    /**
      * Test API connection.
      */
     public function test_connection() {

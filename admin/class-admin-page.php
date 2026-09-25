@@ -180,6 +180,11 @@ class SWS_Admin_Page {
         update_option( 'sws_ai_verify_all',     isset( $_POST['sws_ai_verify_all'] ) ? '1' : '0' );
         update_option( 'sws_dry_run',           isset( $_POST['sws_dry_run'] ) ? '1' : '0' );
         update_option( 'sws_square_truth',      isset( $_POST['sws_square_truth'] ) ? '1' : '0' );
+        update_option( 'sws_quick_stock_sync',  isset( $_POST['sws_quick_stock_sync'] ) ? '1' : '0' );
+        update_option( 'sws_reserve_open_orders', isset( $_POST['sws_reserve_open_orders'] ) ? '1' : '0' );
+        if ( class_exists( 'SWS_Stock_Sync' ) ) {
+            SWS_Stock_Sync::ensure_schedule();
+        }
 
         $sync_cats = isset( $_POST['sws_sync_categories'] ) ? array_map( 'sanitize_text_field', (array) $_POST['sws_sync_categories'] ) : [];
         $all_sq_cats = array_keys( get_option( 'sws_category_mapping', [] ) );
@@ -1101,6 +1106,14 @@ class SWS_Admin_Page {
                                         <label>
                                             <input type="checkbox" name="sws_sync_price" value="1" <?php checked(get_option('sws_sync_price','0'),'1'); ?>>
                                             Sync prices from Square (off by default — enable if Square is your price source)
+                                        </label><br>
+                                        <label>
+                                            <input type="checkbox" name="sws_quick_stock_sync" value="1" <?php checked(get_option('sws_quick_stock_sync','0'),'1'); ?>>
+                                            Update stock from Square every 5 minutes — only items whose Square count changed (register sales reach the website within minutes)
+                                        </label><br>
+                                        <label>
+                                            <input type="checkbox" name="sws_reserve_open_orders" value="1" <?php checked(get_option('sws_reserve_open_orders','1'),'1'); ?>>
+                                            Hold stock for open online orders (pending, processing, on hold; last 14 days) — website stock = Square count − those orders, until the order is completed
                                         </label><br>
                                         <label>
                                             <input type="checkbox" name="sws_square_truth" value="1" <?php checked(get_option('sws_square_truth','0'),'1'); ?>>
