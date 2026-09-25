@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.13.1
+Stable tag: 1.13.2
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,9 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.13.2 =
+* A SKU WooCommerce refuses (still held by a draft or trashed product) is logged and skipped instead of stopping that product's sync. One such error on the first live Square-truth run kept the end-of-run "not in Square" step from running.
 
 = 1.13.1 =
 * Square-truth: an option that has stock on the website but isn't in its Square item is kept and listed for review instead of being retired, and that listing's name is left alone (usually a listing an old link mixed up, e.g. salt vs regular strength). Each duplicate option is counted once.

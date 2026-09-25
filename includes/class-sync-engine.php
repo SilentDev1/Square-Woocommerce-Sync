@@ -648,8 +648,7 @@ PROMPT;
                 $changes[] = [ 'field' => 'sku', 'from' => $wc_product->get_sku() ?: '', 'to' => $sq_var['sku'] ];
                 $this->logger->info( sprintf( '    + SKU: %s → %s', $wc_product->get_sku() ?: '(none)', $sq_var['sku'] ) );
             } else {
-                if ( $this->sku_is_available( $sq_var['sku'], $wc_product->get_id() ) || $this->take_over_sku( $sq_var['sku'], $sq_var['square_variation_id'], $wc_product->get_id() ) ) {
-                    $wc_product->set_sku( $sq_var['sku'] );
+                if ( ( $this->sku_is_available( $sq_var['sku'], $wc_product->get_id() ) || $this->take_over_sku( $sq_var['sku'], $sq_var['square_variation_id'], $wc_product->get_id() ) ) && $this->try_set_sku( $wc_product, $sq_var['sku'] ) ) {
                     $this->stats['sku_added']++;
                     $changes[] = [ 'field' => 'sku', 'from' => '', 'to' => $sq_var['sku'] ];
                     $this->logger->info( sprintf( '    + SKU: %s', $sq_var['sku'] ) );
@@ -786,8 +785,7 @@ PROMPT;
             );
             $sq_sku = $sq_var['sku'];
             if ( ! empty( $sq_sku ) && $wc_sku !== $sq_sku && ! $this->dry_run ) {
-                if ( $this->sku_is_available( $sq_sku, $var_id ) || $this->take_over_sku( $sq_sku, $sq_var['square_variation_id'], $var_id ) ) {
-                    $wc_var->set_sku( $sq_sku );
+                if ( ( $this->sku_is_available( $sq_sku, $var_id ) || $this->take_over_sku( $sq_sku, $sq_var['square_variation_id'], $var_id ) ) && $this->try_set_sku( $wc_var, $sq_sku ) ) {
                     $this->stats['sku_added']++;
                     $var_changes[] = [ 'field' => 'sku', 'variation' => $sq_var['name'], 'from' => $wc_sku ?: '(none)', 'to' => $sq_sku ];
                     $this->logger->info( sprintf( '      + SKU: %s → %s', $wc_sku ?: '(none)', $sq_sku ) );
@@ -966,6 +964,20 @@ PROMPT;
                     $this->sku_item[ strtolower( trim( $sv['sku'] ) ) ][ $sp['square_id'] ] = true;
                 }
             }
+        }
+    }
+
+    /**
+     * Set a SKU without letting WooCommerce's uniqueness check stop the whole product: a SKU can
+     * still be held by a post the lookup doesn't see (a draft or trashed product). Logged and skipped.
+     */
+    private function try_set_sku( $obj, string $sku ) : bool {
+        try {
+            $obj->set_sku( $sku );
+            return true;
+        } catch ( \WC_Data_Exception $e ) {
+            $this->logger->warning( sprintf( '      ⚠ SKU "%s" not set on #%d — %s', $sku, $obj->get_id(), $e->getMessage() ) );
+            return false;
         }
     }
 
@@ -1526,8 +1538,8 @@ PROMPT;
             if ( ! empty( $sq_var['sku'] ) ) {
                 // Pass 0 as owner_id: the variation is brand-new (no post ID yet),
                 // so any existing holder of this SKU is a different product/variation.
-                if ( $this->sku_is_available( $sq_var['sku'], 0 ) ) {
-                    $variation->set_sku( $sq_var['sku'] );
+                if ( $this->sku_is_available( $sq_var['sku'], 0 ) && $this->try_set_sku( $variation, $sq_var['sku'] ) ) {
+                    // SKU set.
                 } else {
                     $this->logger->warning( sprintf( '      ⚠ SKU "%s" already in use — new variation created without SKU', $sq_var['sku'] ) );
                 }
@@ -1983,8 +1995,8 @@ PROMPT;
         $product->set_status( 'draft' );
 
         if ( ! empty( $sq_var['sku'] ) ) {
-            if ( $this->sku_is_available( $sq_var['sku'] ) ) {
-                $product->set_sku( $sq_var['sku'] );
+            if ( $this->sku_is_available( $sq_var['sku'] ) && $this->try_set_sku( $product, $sq_var['sku'] ) ) {
+                // SKU set.
             } else {
                 $this->logger->warning( sprintf( '    ⚠ SKU "%s" already in use — new simple product created without SKU', $sq_var['sku'] ) );
             }
@@ -2072,8 +2084,8 @@ PROMPT;
             $variation->set_parent_id( $product_id );
 
             if ( ! empty( $sq_var['sku'] ) ) {
-                if ( $this->sku_is_available( $sq_var['sku'], $product_id ) ) {
-                    $variation->set_sku( $sq_var['sku'] );
+                if ( $this->sku_is_available( $sq_var['sku'], $product_id ) && $this->try_set_sku( $variation, $sq_var['sku'] ) ) {
+                    // SKU set.
                 } else {
                     $this->logger->warning( sprintf( '      ⚠ SKU "%s" already in use — variation created without SKU', $sq_var['sku'] ) );
                 }
