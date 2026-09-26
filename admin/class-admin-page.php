@@ -186,6 +186,9 @@ class SWS_Admin_Page {
             SWS_Stock_Sync::ensure_schedule();
         }
 
+        $strict = isset( $_POST['sws_strict_categories'] ) ? array_values( array_map( 'sanitize_text_field', (array) $_POST['sws_strict_categories'] ) ) : [];
+        update_option( 'sws_strict_categories', $strict );
+
         $sync_cats = isset( $_POST['sws_sync_categories'] ) ? array_map( 'sanitize_text_field', (array) $_POST['sws_sync_categories'] ) : [];
         $all_sq_cats = array_keys( get_option( 'sws_category_mapping', [] ) );
         if ( count( $sync_cats ) === count( $all_sq_cats ) || empty( $sync_cats ) ) {
@@ -983,6 +986,24 @@ class SWS_Admin_Page {
                                             </script>
                                         <?php else: ?>
                                             <p class="description" style="color:#999;">No Square categories loaded yet. Go to the Dashboard and load categories from Square first, then return here to configure which ones to include in scheduled syncs.</p>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th>Keep These Categories Apart</th>
+                                    <td>
+                                        <?php
+                                        $strict_saved = (array) get_option( 'sws_strict_categories', [] );
+                                        if ( ! empty( $sq_cats ) ): ?>
+                                            <fieldset style="max-height:200px;overflow-y:auto;border:1px solid #ddd;padding:8px 12px;border-radius:4px;">
+                                                <?php foreach ( $sq_cats as $cat ): ?>
+                                                    <label style="display:block;margin-bottom:4px;">
+                                                        <input type="checkbox" name="sws_strict_categories[]" value="<?php echo esc_attr( $cat ); ?>" <?php checked( in_array( $cat, $strict_saved, true ) ); ?>>
+                                                        <?php echo esc_html( $cat ); ?>
+                                                    </label>
+                                                <?php endforeach; ?>
+                                            </fieldset>
+                                            <p class="description">Products in these Square categories are only matched to website products in the category each one is mapped to. Use it for look-alike products that are different items, e.g. Salt Juice vs E-Liquid: a salt listing is never linked to a regular juice (or the other way around), even with the same brand and flavor.</p>
                                         <?php endif; ?>
                                     </td>
                                 </tr>

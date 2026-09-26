@@ -15,6 +15,10 @@ class SWS_Product_Matcher {
     private $matched_wc_ids = [];
     /** WC product (parent) ID → Square item ID that owns it, from _square_product_id meta. */
     private $wc_owner_cache = [];
+    /** Square item ID → its Square category names (set from the run's catalog). */
+    private $item_categories = [];
+    /** Kept-apart Square category name → WooCommerce term ID (setting sws_strict_categories + sws_category_mapping). */
+    private $strict_terms = null;
 
     public function __construct() {
         $this->ai                      = new SWS_Ai_Matcher();
@@ -30,6 +34,59 @@ class SWS_Product_Matcher {
         $this->matched_wc_ids = [];
     }
 
+    /** The run's Square catalog, so stored links can be checked against the owning item's category. */
+    public function set_catalog( array $square_products ) {
+        $this->item_categories = [];
+        foreach ( $square_products as $p ) {
+            $this->item_categories[ $p['square_id'] ] = (array) ( $p['categories'] ?? [] );
+        }
+    }
+
+    private function strict_terms() : array {
+        if ( $this->strict_terms !== null ) {
+            return $this->strict_terms;
+        }
+        $this->strict_terms = [];
+        $mapping = (array) get_option( 'sws_category_mapping', [] );
+        foreach ( (array) get_option( 'sws_strict_categories', [] ) as $cat ) {
+            $tid = (int) ( $mapping[ $cat ] ?? 0 );
+            if ( ! $tid ) {
+                $t   = get_term_by( 'name', $cat, 'product_cat' );
+                $tid = $t ? (int) $t->term_id : 0;
+            }
+            if ( $tid ) {
+                $this->strict_terms[ $cat ] = $tid;
+            }
+        }
+        return $this->strict_terms;
+    }
+
+    /**
+     * Kept-apart categories (e.g. Salt Juice vs E-Liquid): a listing filed under one of them only
+     * matches a Square item from the same one. Returns a reason, or '' when there's no conflict.
+     *
+     * @param string[] $sq_categories Square category names of the item.
+     */
+    public function category_conflict( array $sq_categories, $wc_product ) : string {
+        $strict = $this->strict_terms();
+        if ( ! $strict || ! $wc_product ) {
+            return '';
+        }
+        $want = [];
+        foreach ( $sq_categories as $c ) {
+            if ( isset( $strict[ $c ] ) ) {
+                $want[ $strict[ $c ] ] = $c;
+            }
+        }
+        $pid  = $wc_product->is_type( 'variation' ) ? $wc_product->get_parent_id() : $wc_product->get_id();
+        $have = array_intersect( array_map( 'intval', wp_get_post_terms( $pid, 'product_cat', [ 'fields' => 'ids' ] ) ), array_values( $strict ) );
+        if ( ! $want || ! $have || array_intersect( $have, array_keys( $want ) ) ) {
+            return '';
+        }
+        $site = array_search( (int) reset( $have ), $strict, true );
+        return sprintf( 'Square "%s" vs website "%s"', implode( ', ', $want ), get_term( (int) reset( $have ), 'product_cat' )->name ?? $site );
+    }
+
     public function get_last_match_info() {
         return $this->last_match_info;
     }
@@ -43,6 +100,10 @@ class SWS_Product_Matcher {
 
         // Stage 0: Match by stored Square Product ID (most reliable for re-syncs)
         $meta_match = $this->match_by_square_id( $square_product['square_id'] );
+        if ( $meta_match && ( $why = $this->category_conflict( $square_product['categories'] ?? [], $meta_match ) ) ) {
+            $this->logger->warning( sprintf( '[Matcher] Stored link "%s" → WC #%d ignored: different category (%s)', $square_product['name'], $meta_match->get_id(), $why ) );
+            $meta_match = null;
+        }
         if ( $meta_match ) {
             $this->matched_wc_ids[ $meta_match->get_id() ] = $square_product['name'];
             $this->last_match_info = [ 'method' => 'square_id', 'confidence' => 1.0, 'reasoning' => 'Matched by stored Square Product ID' ];
@@ -58,7 +119,10 @@ class SWS_Product_Matcher {
         if ( $sku_match ) {
             $name_sim = $this->name_similarity( $square_product['name'], $sku_match->get_name() );
             $claimed_by = $this->claimed_by_other( $sku_match->get_id(), $square_product );
-            if ( $claimed_by ) {
+            $cat_clash  = $this->category_conflict( $square_product['categories'] ?? [], $sku_match );
+            if ( $cat_clash ) {
+                $this->logger->warning( sprintf( '[Matcher] SKU match rejected for "%s" → WC #%d: different category (%s)', $square_product['name'], $sku_match->get_id(), $cat_clash ) );
+            } elseif ( $claimed_by ) {
                 $this->logger->warning( sprintf(
                     '[Matcher] SKU match rejected for "%s" → WC #%d "%s": already linked to Square item %s',
                     $square_product['name'], $sku_match->get_id(), $sku_match->get_name(), $claimed_by
@@ -109,7 +173,8 @@ class SWS_Product_Matcher {
         // Filter out WC products already matched to other Square products
         $candidates = array_filter( $candidates, function( $c ) use ( $square_product ) {
             return ! isset( $this->matched_wc_ids[ $c->get_id() ] )
-                && ! $this->claimed_by_other( $c->get_id(), $square_product );
+                && ! $this->claimed_by_other( $c->get_id(), $square_product )
+                && ! $this->category_conflict( $square_product['categories'] ?? [], $c );
         });
         $candidates = array_values( $candidates );
 
@@ -234,6 +299,10 @@ class SWS_Product_Matcher {
         }
         $owner = $this->wc_owner_cache[ (int) $wc_id ] ?? '';
         if ( $owner === '' || $owner === $square_product['square_id'] ) {
+            return '';
+        }
+        // A stored link to an item from a kept-apart category is a mistake, not a claim.
+        if ( isset( $this->item_categories[ $owner ] ) && $this->category_conflict( $this->item_categories[ $owner ], wc_get_product( (int) $wc_id ) ) ) {
             return '';
         }
         // Square sometimes holds two items for one product (e.g. two "Pod Juice Clear"

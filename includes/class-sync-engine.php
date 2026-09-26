@@ -957,6 +957,7 @@ PROMPT;
     }
 
     private function index_skus( array $square_products ) {
+        $this->matcher->set_catalog( $square_products );
         $this->sku_item = [];
         foreach ( $square_products as $sp ) {
             foreach ( $sp['variations'] as $sv ) {

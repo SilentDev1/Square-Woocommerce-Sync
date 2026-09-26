@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.13.2
+Stable tag: 1.14.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,9 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.14.0 =
+* New setting "Keep These Categories Apart" (sws_strict_categories): products in the chosen Square categories only match website products filed under the category each one is mapped to. For look-alikes that are different items, e.g. Salt Juice vs E-Liquid with the same brand and flavor. A stored link, SKU match or name match across those categories is ignored, so a salt listing finds its salt item and the regular juice gets (or keeps) its own listing; options left on the wrong listing are then removed as duplicates.
 
 = 1.13.2 =
 * A SKU WooCommerce refuses (still held by a draft or trashed product) is logged and skipped instead of stopping that product's sync. One such error on the first live Square-truth run kept the end-of-run "not in Square" step from running.
