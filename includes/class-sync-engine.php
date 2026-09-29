@@ -345,6 +345,16 @@ class SWS_Sync_Engine {
 
         delete_option( 'sws_sync_progress' );
         update_option( 'sws_last_sync', current_time( 'mysql' ) );
+
+        // A full run writes the counts it read when it started (up to an hour ago), which can undo a
+        // newer sale the quick stock sync already applied. Have the next quick pass recheck every count
+        // that changed in Square since this run began.
+        if ( ! $this->dry_run ) {
+            $quick_last = (int) get_option( SWS_Stock_Sync::LAST, 0 );
+            if ( $quick_last > (int) $start_time ) {
+                update_option( SWS_Stock_Sync::LAST, (int) $start_time, false );
+            }
+        }
         update_option( 'sws_last_sync_stats', $this->stats );
 
         try {
