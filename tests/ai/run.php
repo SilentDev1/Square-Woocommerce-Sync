@@ -172,6 +172,9 @@ $e = run_or( [ resp( 400, [ 'error' => [ 'code' => 400, 'message' => 'messages: 
 check( 'bad request → REQUEST_FAILED, not retried', is_wp_error( $e ) && $e->get_error_code() === 'REQUEST_FAILED' && count( $GLOBALS['requests'] ) === 1 );
 $e = run_or( [ resp( 402, [ 'error' => [ 'code' => 402 ] ] ) ] );
 check( 'no credits → INSUFFICIENT_CREDITS, not retried', is_wp_error( $e ) && $e->get_error_code() === 'INSUFFICIENT_CREDITS' && count( $GLOBALS['requests'] ) === 1 );
+reset_state(); $slept = []; $GLOBALS['http'] = [ resp( 429, [ 'error' => [ 'type' => 'insufficient_quota', 'code' => 'credit_balance_exhausted', 'message' => 'You exceeded your current quota' ] ] ), resp( 200, [ 'choices' => [ [ 'message' => [ 'content' => 'x' ] ] ] ] ) ];
+$e = SWS_Ai_Provider::make( 'openai', $OPENAI_KEY, 'gpt-4o-mini' )->complete( 'p' );
+check( 'OpenAI out of credits (sent as 429) → INSUFFICIENT_CREDITS, not retried (as found on Evolve)', is_wp_error( $e ) && $e->get_error_code() === 'INSUFFICIENT_CREDITS' && count( $GLOBALS['requests'] ) === 1 && ! $slept );
 $e = run_or( [ resp( 403, [ 'error' => [ 'code' => 403, 'metadata' => [ 'flagged_input' => 'customer Jane' ] ] ] ) ] );
 check( 'moderation/permission → PERMISSION_DENIED; flagged input not echoed', is_wp_error( $e ) && $e->get_error_code() === 'PERMISSION_DENIED' && strpos( $e->get_error_message(), 'Jane' ) === false );
 $e = run_or( [ resp( 200, 'not json' ) ] );

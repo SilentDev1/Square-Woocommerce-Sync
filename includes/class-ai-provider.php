@@ -134,7 +134,8 @@ abstract class SWS_Ai_Provider {
 
             $code = $this->classify( $error_status, is_array( $data ) ? $data : [] );
             $last = $this->error( $code );
-            $retryable = in_array( $error_status, [ 408, 429, 500, 502, 503, 504 ], true )
+            // Out of credits/quota is permanent until someone pays, even when sent as 429 (OpenAI).
+            $retryable = $code !== self::INSUFFICIENT_CREDITS && in_array( $error_status, [ 408, 429, 500, 502, 503, 504 ], true )
                 || ( $error_status === 402 && $retry_after !== null ); // OpenRouter: in-flight budget
             if ( ! $retryable || $attempt >= $attempts ) {
                 return $last;
@@ -182,6 +183,9 @@ abstract class SWS_Ai_Provider {
             case $status === 401:
                 return self::AUTHENTICATION_FAILED;
             case $status === 402:
+            case strpos( $text, 'insufficient_quota' ) !== false:
+            case strpos( $text, 'credit_balance' ) !== false:
+            case strpos( $text, 'billing' ) !== false && $status === 400:
                 return self::INSUFFICIENT_CREDITS;
             case $status === 403:
                 return self::PERMISSION_DENIED;

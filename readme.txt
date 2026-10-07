@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.15.0
+Stable tag: 1.15.1
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,9 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.15.1 =
+* "Out of credits" that OpenAI sends as HTTP 429 (insufficient_quota) is reported as a credits problem and no longer retried as a rate limit.
 
 = 1.15.0 =
 * OpenRouter as a third AI provider (Settings → AI), next to Anthropic and OpenAI: one API for models from many AI providers. Searchable model list with context size and prices from OpenRouter's live catalog; recommendations shown only if OpenRouter still lists them.
