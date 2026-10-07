@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.14.1
+Stable tag: 1.15.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,14 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.15.0 =
+* OpenRouter as a third AI provider (Settings → AI), next to Anthropic and OpenAI: one API for models from many AI providers. Searchable model list with context size and prices from OpenRouter's live catalog; recommendations shown only if OpenRouter still lists them.
+* Each provider now keeps its own API key and model, so switching providers never sends one provider's key to another. Existing settings move to the selected provider automatically; the selected provider doesn't change.
+* Provider code moved out of the matcher into one class per provider: same prompts for all three, bounded retries (3 attempts, exponential backoff, Retry-After) for timeouts, rate limits and 5xx only, and clear messages for authentication, credits, model, rate-limit and outage errors. Provider error text is never shown or logged.
+* Test Connection per provider uses free checks (no paid completion): the key, the model, and for OpenRouter the key's credit limit and today's usage.
+* Credentials are now encrypted with AES-256-GCM (authenticated) and a full-strength derived key. 1.14 values still decrypt; a key that was stored unencrypted is encrypted on upgrade. Saving fails clearly instead of storing plaintext when OpenSSL is missing.
+* The connection test panel escapes messages.
 
 = 1.14.1 =
 * Stock fix: a full sync writes the Square counts it read when it started, which could undo a sale the 5-minute stock sync had already applied (the website showed one more than Square until the next run). After each full sync, the next 5-minute pass now rechecks every count that changed in Square since that sync began.

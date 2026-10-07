@@ -124,6 +124,45 @@ class SWS_Admin_Page {
         ]);
     }
 
+    /**
+     * AI provider, and each provider's own key and model. A key is only replaced when a new one is
+     * typed, removed only with that provider's Remove button, never echoed back to the page.
+     */
+    private function save_ai_settings() {
+        if ( ! isset( $_POST['sws_ai_provider'] ) ) {
+            return; // AI section not on this form (e.g. not Pro): leave everything as it is.
+        }
+        $registry = SWS_Ai_Provider::registry();
+        $selected = sanitize_key( wp_unslash( $_POST['sws_ai_provider'] ) );
+        if ( isset( $registry[ $selected ] ) ) {
+            update_option( 'sws_ai_provider', $selected );
+        }
+        $keys    = isset( $_POST['sws_ai_key'] ) && is_array( $_POST['sws_ai_key'] ) ? wp_unslash( $_POST['sws_ai_key'] ) : [];
+        $actions = isset( $_POST['sws_ai_key_action'] ) && is_array( $_POST['sws_ai_key_action'] ) ? wp_unslash( $_POST['sws_ai_key_action'] ) : [];
+        $models  = isset( $_POST['sws_ai_model'] ) && is_array( $_POST['sws_ai_model'] ) ? wp_unslash( $_POST['sws_ai_model'] ) : [];
+        foreach ( array_keys( $registry ) as $id ) {
+            if ( ( $actions[ $id ] ?? '' ) === 'remove' ) {
+                delete_option( 'sws_ai_key_' . $id );
+            } else {
+                $raw = trim( sanitize_text_field( (string) ( $keys[ $id ] ?? '' ) ) );
+                if ( $raw !== '' ) {
+                    $enc = sws_encrypt_key( $raw );
+                    if ( $enc === '' ) {
+                        set_transient( 'sws_settings_error_' . get_current_user_id(), 'The API key wasn\'t saved: this server can\'t encrypt it (PHP OpenSSL with AES-256-GCM is required).', 60 );
+                    } else {
+                        update_option( 'sws_ai_key_' . $id, $enc, false );
+                    }
+                }
+            }
+            if ( array_key_exists( $id, $models ) ) {
+                $model = SWS_Ai_Provider::sanitize_model( $models[ $id ] );
+                if ( $model !== '' ) {
+                    update_option( 'sws_ai_model_' . $id, $model, false );
+                }
+            }
+        }
+    }
+
     public function save_settings() {
         check_admin_referer( 'sws_settings' );
         if ( ! current_user_can( 'manage_woocommerce' ) ) wp_die( 'Unauthorized' );
@@ -132,9 +171,6 @@ class SWS_Admin_Page {
             'sws_square_access_token',
             'sws_square_location_id',
             'sws_square_environment',
-            'sws_ai_provider',
-            'sws_ai_api_key',
-            'sws_ai_model',
             'sws_ai_confidence_threshold',
             'sws_sync_interval',
             'sws_sync_time',
@@ -149,15 +185,6 @@ class SWS_Admin_Page {
             if ( $field === 'sws_sync_days' ) {
                 $days = isset( $_POST['sws_sync_days'] ) ? array_map( 'sanitize_text_field', (array) $_POST['sws_sync_days'] ) : [];
                 update_option( 'sws_sync_days', implode( ',', $days ) );
-            } elseif ( $field === 'sws_ai_api_key' ) {
-                if ( isset( $_POST['sws_ai_key_action'] ) && $_POST['sws_ai_key_action'] === 'remove' ) {
-                    delete_option( $field );
-                } else {
-                    $raw_key = sanitize_text_field( $_POST[ $field ] ?? '' );
-                    if ( '' !== $raw_key ) {
-                        update_option( $field, sws_encrypt_key( $raw_key ) );
-                    }
-                }
             } elseif ( $field === 'sws_twilio_auth_token' ) {
                 if ( isset( $_POST['sws_twilio_token_action'] ) && $_POST['sws_twilio_token_action'] === 'remove' ) {
                     delete_option( $field );
@@ -171,6 +198,8 @@ class SWS_Admin_Page {
                 update_option( $field, sanitize_text_field( $_POST[ $field ] ?? '' ) );
             }
         }
+
+        $this->save_ai_settings();
 
         update_option( 'sws_sync_stock',        isset( $_POST['sws_sync_stock'] ) ? '1' : '0' );
         update_option( 'sws_sync_price',        isset( $_POST['sws_sync_price'] ) ? '1' : '0' );
@@ -671,6 +700,9 @@ class SWS_Admin_Page {
             <?php if ( isset( $_GET['saved'] ) ): ?>
                 <div class="notice notice-success is-dismissible"><p>Settings saved successfully.</p></div>
             <?php endif; ?>
+            <?php $sws_err = get_transient( 'sws_settings_error_' . get_current_user_id() ); if ( $sws_err ) : delete_transient( 'sws_settings_error_' . get_current_user_id() ); ?>
+                <div class="notice notice-error is-dismissible"><p><?php echo esc_html( $sws_err ); ?></p></div>
+            <?php endif; ?>
 
             <div style="max-width:700px">
                 <div class="sws-card sws-settings-card">
@@ -725,27 +757,20 @@ class SWS_Admin_Page {
                                 <div>
                                     <h4 style="margin:0 0 6px;font-size:14px;">Supported AI Providers</h4>
                                     <p style="margin:0 0 10px;line-height:1.6;color:#374151;font-size:13px;">
-                                        Choose the AI provider that works best for you. Square WooCommerce Sync supports Anthropic Claude and OpenAI for smart product matching and AI description generation. Your API key is stored securely in your WordPress database (AES-256 encrypted) and never shared with third parties. Usage costs are billed directly by your provider.
+                                        Choose the AI provider for smart product matching and AI description generation. Each provider keeps its own API key, stored encrypted (AES-256-GCM) in your WordPress database; the page never shows a saved key again. Only product information (names, SKUs, options, categories, prices, descriptions) is sent, never customer or order data. Usage is billed directly by the provider.
                                     </p>
                                     <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                                        <span style="font-size:12px;background:#fdf4ff;color:#7e22ce;padding:4px 10px;border-radius:6px;font-weight:600;">Anthropic Claude (Haiku) &mdash; Default</span>
-                                        <span style="font-size:12px;background:#f0fdf4;color:#166534;padding:4px 10px;border-radius:6px;font-weight:500;">OpenAI (GPT-4o-mini)</span>
+                                        <span style="font-size:12px;background:#fdf4ff;color:#7e22ce;padding:4px 10px;border-radius:6px;font-weight:600;">Anthropic Claude &mdash; Default</span>
+                                        <span style="font-size:12px;background:#f0fdf4;color:#166534;padding:4px 10px;border-radius:6px;font-weight:500;">OpenAI</span>
+                                        <span style="font-size:12px;background:#eff6ff;color:#1e40af;padding:4px 10px;border-radius:6px;font-weight:500;">OpenRouter &mdash; models from many AI providers through one API</span>
                                     </div>
                                 </div>
                             </div>
 
                             <?php
-                            $sws_provider = get_option('sws_ai_provider', 'anthropic');
-                            $sws_provider_links = array(
-                                'anthropic' => 'https://console.anthropic.com/settings/keys',
-                                'openai'    => 'https://platform.openai.com/api-keys',
-                            );
-                            $sws_provider_names = array(
-                                'anthropic' => 'Anthropic',
-                                'openai'    => 'OpenAI',
-                            );
-                            $sws_link = isset($sws_provider_links[$sws_provider]) ? $sws_provider_links[$sws_provider] : $sws_provider_links['anthropic'];
-                            $sws_pname = isset($sws_provider_names[$sws_provider]) ? $sws_provider_names[$sws_provider] : 'Anthropic';
+                            $sws_registry = SWS_Ai_Provider::registry();
+                            $sws_provider = SWS_Ai_Provider::selected_id();
+                            $sws_labels   = [ 'anthropic' => 'Anthropic Claude', 'openai' => 'OpenAI', 'openrouter' => 'OpenRouter' ];
                             ?>
 
                             <table class="form-table">
@@ -753,68 +778,32 @@ class SWS_Admin_Page {
                                     <th><label for="sws_ai_provider">AI Provider</label></th>
                                     <td>
                                         <select name="sws_ai_provider" id="sws_ai_provider" style="min-width:220px;height:36px;font-size:13px;">
-                                            <option value="anthropic" <?php selected($sws_provider,'anthropic'); ?>>Anthropic (Claude Haiku)</option>
-                                            <option value="openai" <?php selected($sws_provider,'openai'); ?>>OpenAI (GPT-4o-mini)</option>
+                                            <?php foreach ( $sws_registry as $sws_id => $sws_class ): ?>
+                                            <option value="<?php echo esc_attr( $sws_id ); ?>" <?php selected( $sws_provider, $sws_id ); ?>><?php echo esc_html( $sws_labels[ $sws_id ] ?? $sws_class::label() ); ?></option>
+                                            <?php endforeach; ?>
                                         </select>
-                                        <p class="description" style="margin-top:6px;">
-                                            <a id="sws-provider-link" href="<?php echo esc_url($sws_link); ?>" target="_blank" rel="noopener noreferrer" style="color:#059669;text-decoration:none;font-weight:500;">
-                                                &rarr; Get <span id="sws-provider-link-name"><?php echo esc_html($sws_pname); ?></span> API Key
-                                            </a>
-                                        </p>
-                                        <script>
-                                        (function(){
-                                            var sel = document.getElementById('sws_ai_provider');
-                                            var linkEl = document.getElementById('sws-provider-link');
-                                            var nameEl = document.getElementById('sws-provider-link-name');
-                                            var links = {anthropic:'https://console.anthropic.com/settings/keys', openai:'https://platform.openai.com/api-keys'};
-                                            var names = {anthropic:'Anthropic', openai:'OpenAI'};
-                                            sel.addEventListener('change', function(){
-                                                linkEl.href = links[sel.value] || links.anthropic;
-                                                nameEl.textContent = names[sel.value] || 'Anthropic';
-                                            });
-                                        })();
-                                        </script>
+                                        <p class="description" style="margin-top:6px;">The selected provider is the only one Square Sync uses; it never falls back to another provider.</p>
                                     </td>
                                 </tr>
-                                <tr>
-                                    <th><label for="sws_ai_api_key">API Key</label></th>
+                                <?php foreach ( $sws_registry as $sws_id => $sws_class ):
+                                    $sws_key    = SWS_Ai_Provider::saved_key( $sws_id );
+                                    $sws_model  = SWS_Ai_Provider::saved_model( $sws_id );
+                                    $sws_hidden = $sws_id !== $sws_provider ? 'display:none;' : '';
+                                ?>
+                                <tr class="sws-ai-provider-row" data-provider="<?php echo esc_attr( $sws_id ); ?>" style="<?php echo $sws_hidden; ?>">
+                                    <th><label for="sws_ai_key_<?php echo esc_attr( $sws_id ); ?>"><?php echo esc_html( $sws_class::label() ); ?> API Key</label></th>
                                     <td>
-                                        <?php
-                                        $sws_stored_key = get_option('sws_ai_api_key', '');
-                                        $sws_has_key = ! empty($sws_stored_key);
-                                        if ($sws_has_key):
-                                            $sws_decrypted = sws_decrypt_key($sws_stored_key);
-                                            $sws_masked = str_repeat('&#8226;', 8) . esc_html(substr($sws_decrypted, -4));
-                                        ?>
-                                        <div id="sws-key-status" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                        <input type="hidden" name="sws_ai_key_action[<?php echo esc_attr( $sws_id ); ?>]" class="sws-ai-key-action" value="">
+                                        <?php if ( $sws_key !== '' ): ?>
+                                        <div class="sws-key-status" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                                             <span style="display:inline-flex;align-items:center;gap:6px;background:#f0fdf4;border:1px solid #bbf7d0;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;color:#166534;">
                                                 <span style="width:8px;height:8px;background:#16a34a;border-radius:50%;display:inline-block;"></span>
-                                                Connected
+                                                Saved
                                             </span>
-                                            <span style="font-family:monospace;font-size:13px;color:#475569;letter-spacing:1px;"><?php echo $sws_masked; ?></span>
-                                            <button type="button" id="sws-change-key-btn" class="button button-small" style="font-size:12px;">Change Key</button>
-                                            <button type="button" id="sws-remove-key-btn" class="button button-small" style="font-size:12px;color:#991b1b;">Remove Key</button>
+                                            <span style="font-family:monospace;font-size:13px;color:#475569;letter-spacing:1px;"><?php echo str_repeat( '&#8226;', 8 ) . esc_html( substr( $sws_key, -4 ) ); ?></span>
+                                            <button type="button" class="button button-small sws-change-key" style="font-size:12px;">Change Key</button>
+                                            <button type="button" class="button button-small sws-remove-key" style="font-size:12px;color:#991b1b;">Remove Key</button>
                                         </div>
-                                        <input type="hidden" name="sws_ai_key_action" id="sws_ai_key_action" value="">
-                                        <div id="sws-key-input-wrap" style="display:none;margin-top:10px;">
-                                            <input type="password" name="sws_ai_api_key" id="sws_ai_api_key" class="regular-text" value="" placeholder="Paste new API key here" autocomplete="new-password">
-                                            <p class="description" style="margin-top:4px;">Leave blank to keep the existing key. Keys are AES-256 encrypted before storage.</p>
-                                        </div>
-                                        <script>
-                                        (function(){
-                                            document.getElementById('sws-change-key-btn').addEventListener('click', function(){
-                                                document.getElementById('sws-key-status').style.display = 'none';
-                                                document.getElementById('sws-key-input-wrap').style.display = '';
-                                                document.getElementById('sws_ai_api_key').focus();
-                                            });
-                                            document.getElementById('sws-remove-key-btn').addEventListener('click', function(){
-                                                if (confirm('Remove the stored API key? AI features will be disabled.')) {
-                                                    document.getElementById('sws_ai_key_action').value = 'remove';
-                                                    this.closest('form').submit();
-                                                }
-                                            });
-                                        })();
-                                        </script>
                                         <?php else: ?>
                                         <div style="margin-bottom:8px;">
                                             <span style="display:inline-flex;align-items:center;gap:6px;background:#fef2f2;border:1px solid #fecaca;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;color:#991b1b;">
@@ -822,45 +811,110 @@ class SWS_Admin_Page {
                                                 Not connected
                                             </span>
                                         </div>
-                                        <input type="password" name="sws_ai_api_key" id="sws_ai_api_key" class="regular-text" value="" placeholder="Paste your API key here" autocomplete="new-password">
+                                        <?php endif; ?>
+                                        <div class="sws-key-input-wrap" style="<?php echo $sws_key !== '' ? 'display:none;' : ''; ?>margin-top:10px;">
+                                            <input type="password" name="sws_ai_key[<?php echo esc_attr( $sws_id ); ?>]" id="sws_ai_key_<?php echo esc_attr( $sws_id ); ?>" class="regular-text" value="" placeholder="Paste your <?php echo esc_attr( $sws_class::label() ); ?> API key" autocomplete="new-password">
+                                            <p class="description" style="margin-top:4px;">Leave blank to keep the saved key. Encrypted (AES-256-GCM) before it's stored.</p>
+                                        </div>
+                                        <p class="description" style="margin-top:6px;">
+                                            <a href="<?php echo esc_url( $sws_class::key_url() ); ?>" target="_blank" rel="noopener noreferrer" style="color:#059669;text-decoration:none;font-weight:500;">&rarr; Get <?php echo esc_html( $sws_class::label() ); ?> API Key</a>
+                                            <?php if ( $sws_id === 'openrouter' ): ?>&nbsp;&middot;&nbsp;Use a regular key (not a management key) and give it a credit limit.<?php endif; ?>
+                                        </p>
+                                        <p style="margin:8px 0 0;">
+                                            <button type="button" class="button sws-ai-test" data-provider="<?php echo esc_attr( $sws_id ); ?>">Test Connection</button>
+                                            <span class="sws-ai-test-result" style="margin-left:8px;font-size:13px;"></span>
+                                        </p>
+                                    </td>
+                                </tr>
+                                <tr class="sws-ai-provider-row" data-provider="<?php echo esc_attr( $sws_id ); ?>" style="<?php echo $sws_hidden; ?>">
+                                    <th><label for="sws_ai_model_<?php echo esc_attr( $sws_id ); ?>">Model</label></th>
+                                    <td>
+                                        <input type="text" name="sws_ai_model[<?php echo esc_attr( $sws_id ); ?>]" id="sws_ai_model_<?php echo esc_attr( $sws_id ); ?>" value="<?php echo esc_attr( $sws_model ); ?>" class="regular-text" <?php echo $sws_id === 'openrouter' ? 'list="sws-openrouter-models" placeholder="Search OpenRouter models…" autocomplete="off"' : ''; ?>>
+                                        <?php if ( $sws_id === 'anthropic' ): ?>
+                                        <p class="description" style="margin:6px 0 0">
+                                            <strong>Recommended:</strong> <code>claude-3-haiku-20240307</code> (fast &amp; affordable)<br>
+                                            <strong>Best quality:</strong> <code>claude-3-5-sonnet-20241022</code> (more accurate matching)<br>
+                                            <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener" style="font-size:12px">View all Claude models &rarr;</a>
+                                        </p>
+                                        <?php elseif ( $sws_id === 'openai' ): ?>
+                                        <p class="description" style="margin:6px 0 0">
+                                            <strong>Recommended:</strong> <code>gpt-4o-mini</code> (fast &amp; affordable)<br>
+                                            <strong>Best quality:</strong> <code>gpt-4o</code> (more accurate matching)<br>
+                                            <a href="https://platform.openai.com/docs/models" target="_blank" rel="noopener" style="font-size:12px">View all OpenAI models &rarr;</a>
+                                        </p>
+                                        <?php else: ?>
+                                        <datalist id="sws-openrouter-models"></datalist>
+                                        <p class="description" id="sws-openrouter-model-info" style="margin:6px 0 0;min-height:18px;"></p>
+                                        <div id="sws-openrouter-recommended" class="description" style="margin-top:6px;">Loading OpenRouter's current models…</div>
+                                        <p class="description" style="margin:4px 0 0"><a href="https://openrouter.ai/models" target="_blank" rel="noopener" style="font-size:12px">Browse all OpenRouter models &rarr;</a> Prices are per million tokens (input / output).</p>
                                         <?php endif; ?>
                                     </td>
                                 </tr>
-                                <tr>
-                                    <th><label for="sws_ai_model">Model</label></th>
-                                    <td>
-                                        <input type="text" name="sws_ai_model" id="sws_ai_model"
-                                               value="<?php echo esc_attr(get_option('sws_ai_model','claude-3-haiku-20240307')); ?>"
-                                               class="regular-text">
-                                        <?php $current_provider = get_option('sws_ai_provider', 'anthropic'); ?>
-                                        <div id="sws-model-help-anthropic" class="sws-model-help" style="margin-top:6px;<?php echo $current_provider !== 'anthropic' ? 'display:none;' : ''; ?>">
-                                            <p class="description" style="margin:0">
-                                                <strong>Recommended:</strong> <code>claude-3-haiku-20240307</code> (fast &amp; affordable)<br>
-                                                <strong>Best quality:</strong> <code>claude-3-5-sonnet-20241022</code> (more accurate matching)<br>
-                                                <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener" style="font-size:12px">View all Claude models &rarr;</a>
-                                            </p>
-                                        </div>
-                                        <div id="sws-model-help-openai" class="sws-model-help" style="margin-top:6px;<?php echo $current_provider !== 'openai' ? 'display:none;' : ''; ?>">
-                                            <p class="description" style="margin:0">
-                                                <strong>Recommended:</strong> <code>gpt-4o-mini</code> (fast &amp; affordable)<br>
-                                                <strong>Best quality:</strong> <code>gpt-4o</code> (more accurate matching)<br>
-                                                <a href="https://platform.openai.com/docs/models" target="_blank" rel="noopener" style="font-size:12px">View all OpenAI models &rarr;</a>
-                                            </p>
-                                        </div>
-                                        <script type="text/javascript">
-                                        (function(){
-                                            var sel = document.getElementById('sws_ai_provider');
-                                            function swsToggleProvider(){
-                                                var p = sel.value;
-                                                document.getElementById('sws-model-help-anthropic').style.display = p==='anthropic' ? '' : 'none';
-                                                document.getElementById('sws-model-help-openai').style.display = p==='openai' ? '' : 'none';
-                                            }
-                                            swsToggleProvider();
-                                            sel.addEventListener('change', swsToggleProvider);
-                                        })();
-                                        </script>
-                                    </td>
-                                </tr>
+                                <?php endforeach; ?>
+                                <script>
+                                (function(){
+                                    var sel = document.getElementById('sws_ai_provider');
+                                    function show(){
+                                        document.querySelectorAll('.sws-ai-provider-row').forEach(function(r){ r.style.display = r.getAttribute('data-provider') === sel.value ? '' : 'none'; });
+                                        if (sel.value === 'openrouter') loadModels();
+                                    }
+                                    sel.addEventListener('change', show);
+                                    document.querySelectorAll('.sws-change-key').forEach(function(b){ b.addEventListener('click', function(){
+                                        var td = b.closest('td'); td.querySelector('.sws-key-status').style.display = 'none';
+                                        var w = td.querySelector('.sws-key-input-wrap'); w.style.display = ''; w.querySelector('input').focus();
+                                    }); });
+                                    document.querySelectorAll('.sws-remove-key').forEach(function(b){ b.addEventListener('click', function(){
+                                        if (confirm('Remove this saved API key? AI features using this provider stop working.')) {
+                                            b.closest('td').querySelector('.sws-ai-key-action').value = 'remove';
+                                            b.closest('form').submit();
+                                        }
+                                    }); });
+                                    document.querySelectorAll('.sws-ai-test').forEach(function(b){ b.addEventListener('click', function(){
+                                        var out = b.parentNode.querySelector('.sws-ai-test-result');
+                                        b.disabled = true; out.style.color = '#475569'; out.textContent = 'Testing the saved key…';
+                                        var fd = new FormData(); fd.append('action','sws_ai_test'); fd.append('nonce', SWS.nonce); fd.append('provider', b.getAttribute('data-provider'));
+                                        fetch(SWS.ajaxurl, { method:'POST', credentials:'same-origin', body: fd }).then(function(r){ return r.json(); }).then(function(r){
+                                            var d = r && r.data ? r.data : {}; var ok = r && r.success && d.success;
+                                            out.style.color = ok ? '#166534' : '#991b1b'; out.textContent = (ok ? '✓ ' : '✕ ') + (d.message || 'Test failed.');
+                                        }).catch(function(){ out.style.color = '#991b1b'; out.textContent = '✕ Couldn\'t reach WordPress.'; }).finally(function(){ b.disabled = false; });
+                                    }); });
+
+                                    var loaded = false, models = {};
+                                    function price(m){ return (m.in === null ? '?' : '$' + m.in) + ' / ' + (m.out === null ? '?' : '$' + m.out); }
+                                    function info(){
+                                        var el = document.getElementById('sws-openrouter-model-info'); if (!el) return;
+                                        var m = models[document.getElementById('sws_ai_model_openrouter').value];
+                                        el.textContent = m ? (m.name + ' · ' + (m.context ? Math.round(m.context/1000) + 'k context · ' : '') + price(m) + ' per 1M tokens' + (m.json ? ' · JSON output' : '')) : (loaded ? 'Not in OpenRouter\'s current list. Check the model id.' : '');
+                                    }
+                                    function loadModels(){
+                                        if (loaded) return; loaded = true;
+                                        var fd = new FormData(); fd.append('action','sws_ai_models'); fd.append('nonce', SWS.nonce);
+                                        fetch(SWS.ajaxurl, { method:'POST', credentials:'same-origin', body: fd }).then(function(r){ return r.json(); }).then(function(r){
+                                            var box = document.getElementById('sws-openrouter-recommended');
+                                            if (!r || !r.success) { box.textContent = 'Couldn\'t load OpenRouter\'s model list right now. You can still type a model id.'; loaded = false; return; }
+                                            var dl = document.getElementById('sws-openrouter-models'); dl.innerHTML = '';
+                                            r.data.models.forEach(function(m){ models[m.id] = m; var o = document.createElement('option'); o.value = m.id; o.label = m.name; dl.appendChild(o); });
+                                            var tiers = { affordable: 'Recommended · fast & affordable', balanced: 'Balanced', quality: 'Best quality' };
+                                            box.innerHTML = '';
+                                            Object.keys(tiers).forEach(function(t){
+                                                var list = (r.data.recommended || {})[t] || []; if (!list.length) return;
+                                                var p = document.createElement('div'); p.style.margin = '2px 0';
+                                                var s = document.createElement('strong'); s.textContent = tiers[t] + ': '; p.appendChild(s);
+                                                list.forEach(function(m, i){
+                                                    var a = document.createElement('a'); a.href = '#'; a.textContent = m.id; a.title = m.name + ' · ' + price(m) + ' per 1M tokens';
+                                                    a.addEventListener('click', function(e){ e.preventDefault(); document.getElementById('sws_ai_model_openrouter').value = m.id; info(); });
+                                                    var c = document.createElement('code'); c.appendChild(a); p.appendChild(c);
+                                                    var sm = document.createElement('span'); sm.textContent = ' (' + price(m) + ')' + (i < list.length - 1 ? ', ' : ''); p.appendChild(sm);
+                                                });
+                                                box.appendChild(p);
+                                            });
+                                            info();
+                                        }).catch(function(){ loaded = false; });
+                                    }
+                                    var mi = document.getElementById('sws_ai_model_openrouter'); if (mi) mi.addEventListener('input', info);
+                                    show();
+                                })();
+                                </script>
                                 <tr>
                                     <th><label for="sws_ai_confidence_threshold">Match Confidence Threshold</label></th>
                                     <td>

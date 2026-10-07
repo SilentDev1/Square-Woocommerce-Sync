@@ -3,96 +3,31 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 
 /**
  * Handles AI-powered product matching and description generation.
- * Uses the configured AI provider (Anthropic Claude or OpenAI) for intelligent cross-checking.
+ * Uses the configured AI provider (Anthropic, OpenAI or OpenRouter) for intelligent cross-checking.
  */
 class SWS_Ai_Matcher {
 
-    private $api_key;
+    /** @var SWS_Ai_Provider */
     private $provider;
-    private $model;
 
-    public function __construct() {
-        $stored_key     = get_option( 'sws_ai_api_key', '' );
-        $this->api_key  = ! empty( $stored_key ) ? sws_decrypt_key( $stored_key ) : '';
-        $this->provider = get_option( 'sws_ai_provider', 'anthropic' );
-        $this->model    = get_option( 'sws_ai_model', 'claude-3-haiku-20240307' );
+    /**
+     * @param SWS_Ai_Provider|null $provider Defaults to the provider selected in Settings, with its own key and model.
+     */
+    public function __construct( ?SWS_Ai_Provider $provider = null ) {
+        $this->provider = $provider ?: SWS_Ai_Provider::current();
     }
 
+    /** Free check of the selected provider's key (and model where the API can tell). */
     public function test_connection() {
-        if ( empty( $this->api_key ) ) {
-            return [ 'success' => false, 'message' => 'AI API key not configured.' ];
-        }
-
-        $response = $this->complete( 'Say "OK" and nothing else.', 10 );
-        if ( is_wp_error( $response ) ) {
-            return [ 'success' => false, 'message' => $response->get_error_message() ];
-        }
-        return [ 'success' => true, 'message' => 'AI connected: ' . trim( $response ) ];
+        return $this->provider->test_connection();
     }
 
     /**
-     * Core completion request.
+     * Core completion request. Provider-specific HTTP, retries and error wording live in
+     * SWS_Ai_Provider_*; every provider gets the same prompt.
      */
     public function complete( $prompt, $max_tokens = 500 ) {
-        if ( empty( $this->api_key ) ) {
-            return new WP_Error( 'no_key', 'AI API key not configured.' );
-        }
-
-        if ( $this->provider === 'openai' ) {
-            return $this->openai_complete( $prompt, $max_tokens );
-        }
-        return $this->anthropic_complete( $prompt, $max_tokens );
-    }
-
-    private function anthropic_complete( $prompt, $max_tokens ) {
-        $response = wp_remote_post( 'https://api.anthropic.com/v1/messages', [
-            'timeout' => 60,
-            'headers' => [
-                'x-api-key'         => $this->api_key,
-                'anthropic-version' => '2023-06-01',
-                'content-type'      => 'application/json',
-            ],
-            'body' => json_encode([
-                'model'      => $this->model ?: 'claude-3-haiku-20240307',
-                'max_tokens' => $max_tokens,
-                'messages'   => [
-                    [ 'role' => 'user', 'content' => $prompt ],
-                ],
-            ]),
-        ]);
-
-        if ( is_wp_error( $response ) ) return $response;
-
-        $data = json_decode( wp_remote_retrieve_body( $response ), true );
-        if ( isset( $data['error'] ) ) {
-            return new WP_Error( 'ai_error', $data['error']['message'] ?? 'Unknown AI error' );
-        }
-        return $data['content'][0]['text'] ?? '';
-    }
-
-    private function openai_complete( $prompt, $max_tokens ) {
-        $response = wp_remote_post( 'https://api.openai.com/v1/chat/completions', [
-            'timeout' => 60,
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->api_key,
-                'Content-Type'  => 'application/json',
-            ],
-            'body' => json_encode([
-                'model'      => $this->model ?: 'gpt-4o-mini',
-                'max_tokens' => $max_tokens,
-                'messages'   => [
-                    [ 'role' => 'user', 'content' => $prompt ],
-                ],
-            ]),
-        ]);
-
-        if ( is_wp_error( $response ) ) return $response;
-
-        $data = json_decode( wp_remote_retrieve_body( $response ), true );
-        if ( isset( $data['error'] ) ) {
-            return new WP_Error( 'ai_error', $data['error']['message'] ?? 'Unknown AI error' );
-        }
-        return $data['choices'][0]['message']['content'] ?? '';
+        return $this->provider->complete( (string) $prompt, (int) $max_tokens );
     }
 
     /**
@@ -312,7 +247,7 @@ PROMPT;
      * @return array                  Same shape with AI-detected attribute names.
      */
     public function detect_attribute_labels( array $option_labels, $product_name = '' ) {
-        if ( empty( $this->api_key ) || empty( $option_labels ) ) {
+        if ( ! $this->provider->has_key() || empty( $option_labels ) ) {
             return $option_labels;
         }
 
@@ -385,7 +320,7 @@ PROMPT;
      * @return array                 Same variations with enriched option_values.
      */
     public function extract_attributes_from_skus( array $variations, $product_name = '' ) {
-        if ( empty( $this->api_key ) || empty( $variations ) ) {
+        if ( ! $this->provider->has_key() || empty( $variations ) ) {
             return $variations;
         }
 

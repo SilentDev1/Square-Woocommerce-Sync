@@ -3,7 +3,7 @@
  * Plugin Name: Square WooCommerce Sync Pro
  * Plugin URI:  https://cao-tech.com/square-woo-sync
  * Description: AI-powered synchronization between Square inventory and WooCommerce products. Automatically matches products by title, category, and variation, updates SKUs, stock levels, and creates new products with AI-generated descriptions.
- * Version:     1.14.1
+ * Version:     1.15.0
  * Author:      Cao-Tech LLC
  * Author URI:  https://cao-tech.com
  * License:     GPL-2.0-or-later
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'SWS_VERSION', '1.14.1' );
+define( 'SWS_VERSION', '1.15.0' );
 define( 'SWS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SWS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'SWS_PLUGIN_FILE', __FILE__ );
@@ -230,33 +230,59 @@ function sws_cipher_key() {
     return substr( hash( 'sha256', wp_salt( 'auth' ) . wp_salt( 'secure_auth' ) ), 0, 32 );
 }
 
-function sws_encrypt_key( $plain ) {
-    if ( empty( $plain ) ) {
-        return '';
-    }
-    if ( ! function_exists( 'openssl_encrypt' ) ) {
-        return base64_encode( $plain );
-    }
-    $iv  = openssl_random_pseudo_bytes( 16 );
-    $enc = openssl_encrypt( $plain, 'AES-256-CBC', sws_cipher_key(), 0, $iv );
-    return base64_encode( $iv . $enc );
+/** The 1.x format (AES-256-CBC), only to keep a rollback copy readable by 1.x. */
+function sws_encrypt_key_v1( $plain ) {
+    $iv  = random_bytes( 16 );
+    $enc = openssl_encrypt( (string) $plain, 'AES-256-CBC', sws_cipher_key(), 0, $iv );
+    return $enc === false ? '' : base64_encode( $iv . $enc );
 }
 
-function sws_decrypt_key( $stored ) {
-    if ( empty( $stored ) ) {
+/** 32 raw bytes for AES-256-GCM, derived from the WordPress salts (or SWS_CIPHER_KEY). */
+function sws_cipher_key_v2() {
+    $secret = defined( 'SWS_CIPHER_KEY' ) ? (string) SWS_CIPHER_KEY : wp_salt( 'auth' ) . wp_salt( 'secure_auth' );
+    return hash_hkdf( 'sha256', $secret, 32, 'square-woo-sync/credential/v2' );
+}
+
+/**
+ * Encrypt a credential for storage: "v2:" + base64(iv | tag | ciphertext), AES-256-GCM
+ * (authenticated: a modified value fails to decrypt instead of producing garbage).
+ * Returns '' when it can't encrypt; the caller must then refuse to save.
+ */
+function sws_encrypt_key( $plain ) {
+    $plain = (string) $plain;
+    if ( $plain === '' || ! function_exists( 'openssl_encrypt' ) || ! in_array( 'aes-256-gcm', openssl_get_cipher_methods(), true ) ) {
         return '';
     }
-    if ( ! function_exists( 'openssl_decrypt' ) ) {
-        return base64_decode( $stored );
+    $iv  = random_bytes( 12 );
+    $tag = '';
+    $enc = openssl_encrypt( $plain, 'aes-256-gcm', sws_cipher_key_v2(), OPENSSL_RAW_DATA, $iv, $tag, 'sws-v2', 16 );
+    return $enc === false ? '' : 'v2:' . base64_encode( $iv . $tag . $enc );
+}
+
+/**
+ * Decrypt a stored credential. Reads v2 (AES-256-GCM) and the 1.x format (AES-256-CBC).
+ * Returns '' when the value can't be decrypted, never the stored ciphertext.
+ */
+function sws_decrypt_key( $stored ) {
+    $stored = (string) $stored;
+    if ( $stored === '' || ! function_exists( 'openssl_decrypt' ) ) {
+        return '';
     }
+    if ( strpos( $stored, 'v2:' ) === 0 ) {
+        $raw = base64_decode( substr( $stored, 3 ), true );
+        if ( $raw === false || strlen( $raw ) < 29 ) {
+            return '';
+        }
+        $dec = openssl_decrypt( substr( $raw, 28 ), 'aes-256-gcm', sws_cipher_key_v2(), OPENSSL_RAW_DATA, substr( $raw, 0, 12 ), substr( $raw, 12, 16 ), 'sws-v2' );
+        return $dec === false ? '' : $dec;
+    }
+    // 1.x format.
     $raw = base64_decode( $stored );
-    if ( strlen( $raw ) < 16 ) {
-        return $stored;
+    if ( $raw === false || strlen( $raw ) < 17 ) {
+        return '';
     }
-    $iv  = substr( $raw, 0, 16 );
-    $enc = substr( $raw, 16 );
-    $dec = openssl_decrypt( $enc, 'AES-256-CBC', sws_cipher_key(), 0, $iv );
-    return $dec !== false ? $dec : $stored;
+    $dec = openssl_decrypt( substr( $raw, 16 ), 'AES-256-CBC', sws_cipher_key(), 0, substr( $raw, 0, 16 ) );
+    return $dec === false ? '' : $dec;
 }
 
 // Autoload classes
@@ -295,7 +321,12 @@ class Square_Woo_Sync {
         }
 
         require_once SWS_PLUGIN_DIR . 'includes/class-square-api.php';
+        require_once SWS_PLUGIN_DIR . 'includes/class-ai-provider.php';
+        require_once SWS_PLUGIN_DIR . 'includes/class-ai-provider-anthropic.php';
+        require_once SWS_PLUGIN_DIR . 'includes/class-ai-provider-openai.php';
+        require_once SWS_PLUGIN_DIR . 'includes/class-ai-provider-openrouter.php';
         require_once SWS_PLUGIN_DIR . 'includes/class-ai-matcher.php';
+        SWS_Ai_Provider::migrate(); // 1.15.0: shared AI key → per-provider key (once)
         require_once SWS_PLUGIN_DIR . 'includes/class-product-matcher.php';
         require_once SWS_PLUGIN_DIR . 'includes/class-sync-engine.php';
         require_once SWS_PLUGIN_DIR . 'includes/class-sync-logger.php';
@@ -322,6 +353,8 @@ class Square_Woo_Sync {
         add_action( 'wp_ajax_sws_get_categories',    [ $this, 'ajax_get_categories' ] );
         add_action( 'wp_ajax_sws_save_catmap',       [ $this, 'ajax_save_catmap' ] );
         add_action( 'wp_ajax_sws_test_connections',  [ $this, 'ajax_test_connections' ] );
+        add_action( 'wp_ajax_sws_ai_test',           [ $this, 'ajax_ai_test' ] );
+        add_action( 'wp_ajax_sws_ai_models',         [ $this, 'ajax_ai_models' ] );
         add_action( 'wp_ajax_sws_get_log',           [ $this, 'ajax_get_log' ] );
         add_action( 'wp_ajax_sws_clear_log',         [ $this, 'ajax_clear_log' ] );
         add_action( 'wp_ajax_sws_get_debug_log',     [ $this, 'ajax_get_debug_log' ] );
@@ -779,6 +812,30 @@ class Square_Woo_Sync {
             'square' => $square->test_connection(),
             'ai'     => $ai->test_connection(),
         ]);
+    }
+
+    /** Test one AI provider's saved key (free check; no completion). Plain-text message only. */
+    public function ajax_ai_test() {
+        check_ajax_referer( 'sws_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) wp_die( 'Unauthorized' );
+        $id = sanitize_key( $_POST['provider'] ?? '' );
+        if ( ! isset( SWS_Ai_Provider::registry()[ $id ] ) ) {
+            wp_send_json_error( [ 'message' => 'Unknown AI provider.' ] );
+        }
+        $r = SWS_Ai_Provider::make( $id )->test_connection();
+        wp_send_json_success( [ 'success' => (bool) $r['success'], 'code' => (string) $r['code'], 'message' => wp_strip_all_tags( (string) $r['message'] ) ] );
+    }
+
+    /** OpenRouter's public model list, trimmed (ids, names, context, prices). No key involved. */
+    public function ajax_ai_models() {
+        check_ajax_referer( 'sws_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) wp_die( 'Unauthorized' );
+        $provider = new SWS_Ai_Provider_Openrouter( '', '' );
+        $models   = $provider->list_models();
+        if ( is_wp_error( $models ) ) {
+            wp_send_json_error( [ 'message' => $models->get_error_message() ] );
+        }
+        wp_send_json_success( [ 'models' => $models, 'recommended' => SWS_Ai_Provider_Openrouter::recommendations( $models ) ] );
     }
 
     public function ajax_get_log() {

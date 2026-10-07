@@ -372,7 +372,7 @@
         return `
             <div class="sws-conn-item">
                 <span class="sws-conn-dot ${ok ? 'ok' : 'err'}"></span>
-                <strong>${label}:</strong> ${result.message}
+                <strong>${label}:</strong> ${$('<div>').text(result.message || '').html()}
             </div>
         `;
     }
