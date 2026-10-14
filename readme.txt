@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.15.1
+Stable tag: 1.15.2
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,10 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.15.2 =
+* Qwen models in the OpenRouter recommendations: Qwen 3.7 Flash (affordable), Qwen 3.7 Plus (balanced), Qwen 3.7 Max (quality). Any other OpenRouter model id still works.
+* Reasoning control for OpenRouter: reasoning is switched off for models where it's optional (Qwen 3.7 reasons by default, which counted against the answer's tokens) and kept low, with room for it, where it's mandatory. An answer cut off by the token limit is reported instead of read as empty.
 
 = 1.15.1 =
 * "Out of credits" that OpenAI sends as HTTP 429 (insufficient_quota) is reported as a credits problem and no longer retried as a rate limit.

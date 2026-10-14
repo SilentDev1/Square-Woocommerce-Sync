@@ -8,18 +8,21 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 class SWS_Ai_Provider_Openrouter extends SWS_Ai_Provider {
 
     const API          = 'https://openrouter.ai/api/v1';
-    const MODELS_CACHE = 'sws_openrouter_models';
+    const MODELS_CACHE = 'sws_openrouter_models_v2'; // v2: includes each model's reasoning mode
 
     /**
      * Suggestions for Square Sync's short JSON tasks (matching, attribute labels, descriptions),
-     * checked against OpenRouter's catalog on 2026-10-07. The settings page only shows the ones
-     * OpenRouter still lists, with live prices.
+     * checked against OpenRouter's catalog on 2026-10-07 (Qwen added 2026-10-14). The settings page
+     * only shows the ones OpenRouter still lists, with live prices.
      */
     const RECOMMENDED = [
-        'affordable' => [ 'openai/gpt-4.1-mini', 'openai/gpt-4o-mini', 'google/gemini-3.1-flash-lite' ],
-        'balanced'   => [ 'anthropic/claude-haiku-4.5' ],
-        'quality'    => [ 'anthropic/claude-sonnet-5', 'openai/gpt-5.4' ],
+        'affordable' => [ 'openai/gpt-4.1-mini', 'qwen/qwen3.7-flash', 'openai/gpt-4o-mini', 'google/gemini-3.1-flash-lite' ],
+        'balanced'   => [ 'qwen/qwen3.7-plus', 'anthropic/claude-haiku-4.5' ],
+        'quality'    => [ 'anthropic/claude-sonnet-5', 'qwen/qwen3.7-max', 'openai/gpt-5.4' ],
     ];
+
+    /** Extra completion tokens allowed when a model must reason (its reasoning counts against max_tokens). */
+    const REASONING_ALLOWANCE = 1024;
 
     public static function id(): string { return 'openrouter'; }
     public static function label(): string { return 'OpenRouter'; }
@@ -37,17 +40,48 @@ class SWS_Ai_Provider_Openrouter extends SWS_Ai_Provider {
     }
 
     protected function completion_request( string $prompt, int $max_tokens ): array {
-        return [ self::API . '/chat/completions', $this->headers(), [
+        $body = [
             'model'      => $this->model,
             'max_tokens' => $max_tokens,
             'messages'   => [ [ 'role' => 'user', 'content' => $prompt ] ],
-        ] ];
+        ];
+        // Reasoning tokens count against max_tokens, and Square Sync's tasks are short JSON answers:
+        // switch reasoning off where the model allows it; where it's mandatory keep it low and leave
+        // room for it. Models that don't reason get no reasoning field (documented behaviour).
+        switch ( $this->reasoning_mode() ) {
+            case 'optional':
+                $body['reasoning'] = [ 'effort' => 'none' ];
+                break;
+            case 'mandatory':
+                $body['reasoning']  = [ 'effort' => 'low' ];
+                $body['max_tokens'] = $max_tokens + self::REASONING_ALLOWANCE;
+                break;
+        }
+        return [ self::API . '/chat/completions', $this->headers(), $body ];
+    }
+
+    /** 'none' | 'optional' | 'mandatory', from the cached catalog ('none' when unknown). */
+    private function reasoning_mode(): string {
+        $models = $this->list_models();
+        if ( is_wp_error( $models ) ) {
+            return 'none';
+        }
+        $base = preg_replace( '~:(nitro|floor|exacto|online)$~', '', $this->model );
+        foreach ( $models as $m ) {
+            if ( $m['id'] === $this->model || $m['id'] === $base ) {
+                return $m['reasoning'] ?? 'none';
+            }
+        }
+        return 'none';
     }
 
     protected function completion_text( $data ) {
         $text = $data['choices'][0]['message']['content'] ?? null;
         if ( ! is_string( $text ) ) {
             return $this->error( self::MALFORMED_RESPONSE );
+        }
+        if ( $text === '' && ( $data['choices'][0]['finish_reason'] ?? '' ) === 'length' ) {
+            return $this->error( self::MALFORMED_RESPONSE ); // The token budget ran out before any answer.
         }
         if ( ( $data['choices'][0]['finish_reason'] ?? '' ) === 'error' ) {
             return $this->error( self::MODEL_UNAVAILABLE );
@@ -136,6 +170,7 @@ class SWS_Ai_Provider_Openrouter extends SWS_Ai_Provider {
                 'in'      => $price( $m['pricing']['prompt'] ?? null ),
                 'out'     => $price( $m['pricing']['completion'] ?? null ),
                 'json'    => in_array( 'response_format', (array) ( $m['supported_parameters'] ?? [] ), true ),
+                'reasoning' => ! isset( $m['reasoning'] ) || ! is_array( $m['reasoning'] ) ? 'none' : ( ! empty( $m['reasoning']['mandatory'] ) ? 'mandatory' : 'optional' ),
             ];
         }
         if ( ! $out ) {

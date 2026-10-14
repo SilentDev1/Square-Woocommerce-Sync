@@ -70,7 +70,16 @@ function check( string $name, bool $ok, string $detail = '' ) {
 	$ok ? $pass++ : $fail++;
 	echo ( $ok ? 'PASS ' : 'FAIL ' ) . $name . ( ! $ok && $detail !== '' ? "\n     $detail" : '' ) . "\n";
 }
-function reset_state() { $GLOBALS['opts'] = []; $GLOBALS['transients'] = []; $GLOBALS['http'] = []; $GLOBALS['requests'] = []; }
+// A cached OpenRouter catalog (as list_models() stores it), so completions don't fetch it.
+function or_catalog() {
+	return [
+		[ 'id' => 'openai/gpt-4.1-mini', 'name' => 'OpenAI: GPT-4.1 Mini', 'context' => 1047576, 'in' => 0.4, 'out' => 1.6, 'json' => true, 'reasoning' => 'none' ],
+		[ 'id' => 'qwen/qwen3.7-flash', 'name' => 'Qwen: Qwen3.7 Flash', 'context' => 1000000, 'in' => 0.03, 'out' => 0.13, 'json' => true, 'reasoning' => 'optional' ],
+		[ 'id' => 'qwen/qwen3.7-plus', 'name' => 'Qwen: Qwen3.7 Plus', 'context' => 1000000, 'in' => 0.32, 'out' => 1.28, 'json' => true, 'reasoning' => 'optional' ],
+		[ 'id' => 'openai/gpt-5-mini', 'name' => 'OpenAI: GPT-5 Mini', 'context' => 400000, 'in' => 0.25, 'out' => 2.0, 'json' => true, 'reasoning' => 'mandatory' ],
+	];
+}
+function reset_state() { $GLOBALS['opts'] = []; $GLOBALS['transients'] = [ SWS_Ai_Provider_Openrouter::MODELS_CACHE => or_catalog() ]; $GLOBALS['http'] = []; $GLOBALS['requests'] = []; }
 
 $OPENAI_KEY = 'sk-proj-TESTopenaiKEY000000000000001234';
 $ANTH_KEY   = 'sk-ant-api03-TESTanthropicKEY0000000005678';
@@ -187,7 +196,7 @@ $e = run_or( [ resp( 200, [ 'choices' => [ [ 'finish_reason' => 'error', 'messag
 check( 'finish_reason "error" → MODEL_UNAVAILABLE', is_wp_error( $e ) && $e->get_error_code() === 'MODEL_UNAVAILABLE' );
 
 // ── 6. Test connection (free endpoints, no completion) ──────────────────
-reset_state();
+reset_state(); $GLOBALS['transients'] = [];
 $catalog = [ 'data' => [ [ 'id' => 'openai/gpt-4.1-mini', 'name' => 'OpenAI: GPT-4.1 Mini', 'context_length' => 1047576, 'pricing' => [ 'prompt' => '0.0000004', 'completion' => '0.0000016' ], 'supported_parameters' => [ 'response_format' ], 'architecture' => [ 'output_modalities' => [ 'text' ] ] ], [ 'id' => 'img/only', 'architecture' => [ 'output_modalities' => [ 'image' ] ] ] ] ];
 $GLOBALS['http'] = [ resp( 200, [ 'data' => [ 'label' => 'sk-or-v1-abc...xyz', 'limit' => 5, 'limit_remaining' => 4.5, 'usage_daily' => 0.12 ] ] ), resp( 200, $catalog ) ];
 $r = SWS_Ai_Provider::make( 'openrouter', $OR_KEY, 'openai/gpt-4.1-mini' )->test_connection();
@@ -198,7 +207,7 @@ reset_state();
 $GLOBALS['http'] = [ resp( 401, [ 'error' => [ 'code' => 401 ] ] ) ];
 $r = SWS_Ai_Provider::make( 'openrouter', $OR_KEY, 'openai/gpt-4.1-mini' )->test_connection();
 check( 'test connection: invalid key → Authentication failed message', ! $r['success'] && $r['code'] === 'AUTHENTICATION_FAILED' );
-reset_state();
+reset_state(); $GLOBALS['transients'] = [];
 $GLOBALS['http'] = [ resp( 200, [ 'data' => [ 'limit' => null ] ] ), resp( 200, $catalog ) ];
 $r = SWS_Ai_Provider::make( 'openrouter', $OR_KEY, 'acme/does-not-exist' )->test_connection();
 check( 'test connection: configured model unavailable', ! $r['success'] && $r['code'] === 'MODEL_NOT_FOUND' );
@@ -223,7 +232,7 @@ $r = SWS_Ai_Provider::make( 'openrouter', '', 'openai/gpt-4.1-mini' )->test_conn
 check( 'test connection without a key: no request sent', ! $r['success'] && ! $GLOBALS['requests'] );
 
 // ── 7. Model list ───────────────────────────────────────────────────────
-reset_state();
+reset_state(); $GLOBALS['transients'] = [];
 $GLOBALS['http'] = [ resp( 200, $catalog ) ];
 $m = ( new SWS_Ai_Provider_Openrouter( '', '' ) )->list_models();
 check( 'models: text models only, with context/price/json', count( $m ) === 1 && $m[0]['id'] === 'openai/gpt-4.1-mini' && $m[0]['in'] == 0.4 && $m[0]['out'] == 1.6 && $m[0]['json'] === true );
@@ -232,6 +241,29 @@ $GLOBALS['http'] = [];
 check( 'models: cached (no second request)', ( new SWS_Ai_Provider_Openrouter( '', '' ) )->list_models() === $m );
 $rec = SWS_Ai_Provider_Openrouter::recommendations( $m );
 check( 'recommendations: only models OpenRouter still lists', isset( $rec['affordable'] ) && count( $rec['affordable'] ) === 1 && ! isset( $rec['quality'] ) );
+
+// ── 7b. Reasoning control and Qwen ─────────────────────────────────────
+$body_for = function ( string $model, int $max = 300 ) use ( $OR_KEY ) {
+	reset_state();
+	$GLOBALS['http'] = [ resp( 200, [ 'choices' => [ [ 'finish_reason' => 'stop', 'message' => [ 'content' => '{"ok":true}' ] ] ] ] ) ];
+	$t = SWS_Ai_Provider::make( 'openrouter', $OR_KEY, $model )->complete( 'p', $max );
+	return [ $t, json_decode( $GLOBALS['requests'][0]['args']['body'] ?? '{}', true ), count( $GLOBALS['requests'] ) ];
+};
+[ $t, $b, $n ] = $body_for( 'qwen/qwen3.7-flash' );
+check( 'Qwen (reasoning optional, on by default): reasoning switched off, budget unchanged', $t === '{"ok":true}' && ( $b['reasoning'] ?? null ) === [ 'effort' => 'none' ] && $b['max_tokens'] === 300 && $n === 1 );
+[ $t, $b ] = $body_for( 'openai/gpt-5-mini' );
+check( 'mandatory reasoning: low effort and room for it in max_tokens', ( $b['reasoning'] ?? null ) === [ 'effort' => 'low' ] && $b['max_tokens'] === 300 + SWS_Ai_Provider_Openrouter::REASONING_ALLOWANCE );
+[ $t, $b ] = $body_for( 'openai/gpt-4.1-mini' );
+check( 'model without reasoning (Evolve\'s current gpt-4.1-mini): no reasoning field, request unchanged', ! array_key_exists( 'reasoning', $b ) && $b['max_tokens'] === 300 );
+[ $t, $b ] = $body_for( 'acme/unknown-model' );
+check( 'model not in the catalog: no reasoning field sent', ! array_key_exists( 'reasoning', $b ) );
+reset_state();
+$GLOBALS['http'] = [ resp( 200, [ 'choices' => [ [ 'finish_reason' => 'length', 'message' => [ 'content' => '' ] ] ] ] ) ];
+$e = SWS_Ai_Provider::make( 'openrouter', $OR_KEY, 'openai/gpt-4.1-mini' )->complete( 'p', 5 );
+check( 'token budget used up with no answer → MALFORMED_RESPONSE (not an empty match)', is_wp_error( $e ) && $e->get_error_code() === 'MALFORMED_RESPONSE' );
+$rec = SWS_Ai_Provider_Openrouter::recommendations( or_catalog() );
+check( 'Qwen is recommended when OpenRouter lists it', in_array( 'qwen/qwen3.7-flash', array_column( $rec['affordable'] ?? [], 'id' ), true ) && in_array( 'qwen/qwen3.7-plus', array_column( $rec['balanced'] ?? [], 'id' ), true ) );
+check( 'Qwen models not in the catalog are not recommended', ! in_array( 'qwen/qwen3.7-max', array_column( $rec['quality'] ?? [], 'id' ), true ) );
 
 // ── 8. Provider switching uses each provider's own key ──────────────────
 reset_state();
