@@ -3,7 +3,7 @@ Contributors: caotechllc
 Tags: square, woocommerce, inventory sync, product sync, pos
 Requires at least: 5.8
 Tested up to: 6.7
-Stable tag: 1.15.2
+Stable tag: 1.15.3
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -105,6 +105,10 @@ Yes. Configure hourly or daily automatic sync from the Settings page. The plugin
 5. Pro License management page
 
 == Changelog ==
+
+= 1.15.3 =
+* A device kit and its replacement pods (e.g. "Crave Ultra Pods" and "Crave Ultra Pods Kit") are never matched to one WooCommerce product. Product names say which is which, even though they share every brand and model word.
+* Two Square items share one WooCommerce product only when they're real duplicates (the same name), or when the product is marked as deliberately serving both (`_sws_also_serves`). Before, once one item's variations had leaked into another item's product, both items kept syncing into it.
 
 = 1.15.2 =
 * Qwen models in the OpenRouter recommendations: Qwen 3.7 Flash (affordable), Qwen 3.7 Plus (balanced), Qwen 3.7 Max (quality). Any other OpenRouter model id still works.

@@ -317,6 +317,12 @@ class SWS_Product_Matcher {
         // "Crave Ultra Pods Kit" are different products; once one item's variations had leaked into the
         // other's product, the old check kept letting both items sync into it every night.
         $sq_var_ids = array_filter( array_column( $square_product['variations'] ?? [], 'square_variation_id' ) );
+        // A product can also be marked as deliberately serving more items (_sws_also_serves: Square item IDs),
+        // e.g. two Square entries with different names for one shelf item.
+        $also = (array) get_post_meta( (int) $wc_id, '_sws_also_serves', true );
+        if ( in_array( $square_product['square_id'], $also, true ) ) {
+            return '';
+        }
         if ( $sq_var_ids && self::same_item_name( $this->owner_name( $owner ), $square_product['name'] ?? '' ) ) {
             global $wpdb;
             $in     = implode( ',', array_fill( 0, count( $sq_var_ids ), '%s' ) );
