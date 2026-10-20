@@ -17,6 +17,8 @@ class SWS_Product_Matcher {
     private $wc_owner_cache = [];
     /** Square item ID → its Square category names (set from the run's catalog). */
     private $item_categories = [];
+    /** Square item id → name for this run (stored links are checked against the owner's name). */
+    private $item_names = [];
     /** Kept-apart Square category name → WooCommerce term ID (setting sws_strict_categories + sws_category_mapping). */
     private $strict_terms = null;
 
@@ -37,8 +39,10 @@ class SWS_Product_Matcher {
     /** The run's Square catalog, so stored links can be checked against the owning item's category. */
     public function set_catalog( array $square_products ) {
         $this->item_categories = [];
+        $this->item_names      = [];
         foreach ( $square_products as $p ) {
             $this->item_categories[ $p['square_id'] ] = (array) ( $p['categories'] ?? [] );
+            $this->item_names[ $p['square_id'] ]      = (string) ( $p['name'] ?? '' );
         }
     }
 
@@ -309,8 +313,11 @@ class SWS_Product_Matcher {
         // entries). When this product's variations are already linked to this Square
         // item's variations, it serves both items — not a conflict. Without this the
         // second item was rejected every night and a duplicate draft was created.
+        // 1.15.3: only for real duplicates — two items with the same name. "Crave Ultra Pods" and
+        // "Crave Ultra Pods Kit" are different products; once one item's variations had leaked into the
+        // other's product, the old check kept letting both items sync into it every night.
         $sq_var_ids = array_filter( array_column( $square_product['variations'] ?? [], 'square_variation_id' ) );
-        if ( $sq_var_ids ) {
+        if ( $sq_var_ids && self::same_item_name( $this->owner_name( $owner ), $square_product['name'] ?? '' ) ) {
             global $wpdb;
             $in     = implode( ',', array_fill( 0, count( $sq_var_ids ), '%s' ) );
             $linked = $wpdb->get_var( $wpdb->prepare(
@@ -326,6 +333,34 @@ class SWS_Product_Matcher {
         return $owner;
     }
 
+    /** Name of the Square item that owns a product: from this run's catalog, else the last sync record. */
+    private function owner_name( string $square_id ) : string {
+        if ( isset( $this->item_names[ $square_id ] ) ) {
+            return $this->item_names[ $square_id ];
+        }
+        global $wpdb;
+        return (string) $wpdb->get_var( $wpdb->prepare( "SELECT square_name FROM {$wpdb->prefix}sws_products WHERE square_id = %s", $square_id ) );
+    }
+
+    /** Same name apart from case, spacing and punctuation ("Pod Juice Clear" twice). */
+    public static function same_item_name( $a, $b ) : bool {
+        $norm = function ( $n ) {
+            return trim( preg_replace( '/[^a-z0-9]+/', ' ', strtolower( html_entity_decode( (string) $n, ENT_QUOTES, 'UTF-8' ) ) ) );
+        };
+        return $norm( $a ) !== '' && $norm( $a ) === $norm( $b );
+    }
+
+    /**
+     * What kind of product a name describes: a device "kit", replacement "pods"/cartridges, or ''
+     * (can't tell). "X Pods" and "X Pods Kit" are sold separately and must never be one product.
+     */
+    public static function product_form( $name ) : string {
+        $n = ' ' . preg_replace( '/[^a-z0-9]+/', ' ', strtolower( html_entity_decode( (string) $name, ENT_QUOTES, 'UTF-8' ) ) ) . ' ';
+        if ( preg_match( '/ (kit|kits) /', $n ) ) return 'kit';
+        if ( preg_match( '/ (pod|pods|cartridge|cartridges) /', $n ) ) return 'pods';
+        return '';
+    }
+
     /**
      * Word-level check that two product names describe the same item.
      *
@@ -336,7 +371,12 @@ class SWS_Product_Matcher {
      * share most of their words (Jaccard >= 0.6). Differing flavours/models on both
      * sides fail the check.
      */
-    public static function names_compatible( $name_a, $name_b ) {
+    public static function names_compatible( $name_a, $name_b, $check_form = true ) {
+        // A device kit and its replacement pods share every brand/model word; the form tells them apart.
+        // ($check_form = false: the loose check, for "only flag for review" decisions.)
+        $form_a = self::product_form( $name_a );
+        $form_b = self::product_form( $name_b );
+        if ( $check_form && $form_a !== '' && $form_b !== '' && $form_a !== $form_b ) return false;
         $a = self::name_tokens( $name_a );
         $b = self::name_tokens( $name_b );
         if ( empty( $a ) || empty( $b ) ) {

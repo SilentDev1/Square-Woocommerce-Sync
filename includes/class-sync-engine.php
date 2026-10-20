@@ -1362,7 +1362,7 @@ PROMPT;
             }
             $looks_like = false;
             foreach ( $names as $n ) {
-                if ( SWS_Product_Matcher::names_compatible( $n, $p->get_name() ) ) {
+                if ( SWS_Product_Matcher::names_compatible( $n, $p->get_name(), false ) ) { // Loose: a near-name keeps it for review, not out of stock.
                     $looks_like = $n;
                     break;
                 }
